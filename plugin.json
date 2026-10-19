@@ -5,7 +5,7 @@
   "apiVersion": 1,
   "category": "utility",
   "entry": "index.js",
-  "description": "监听宿主自身的 skills、plugins、src 目录与 config.json，检测到变更后通过私聊通知所有者，并区分该变更是否需重启进程才能生效。不监听会话存档、运行日志、下载目录及其他路径。采用去抖（默认 10 秒）、冷却（默认 15 分钟）与临时文件过滤抑制重复通知；发送失败重试 3 次。",
+  "description": "监听宿主自身的 skills、plugins、src 目录与 config.json，检测到变更后通过私聊通知所有者，并区分该变更是否需重启进程才能生效。通知内容默认由当前模型结合角色设定生成，措辞不固定；模型不可用时回退到固定模板。不监听会话存档、运行日志、下载目录及其他路径。采用去抖（默认 10 秒）、冷却（默认 15 分钟）与临时文件过滤抑制重复通知；发送失败重试 3 次。",
   "author": "qingyan521314",
   "repository": {
     "type": "git",
@@ -20,6 +20,9 @@
     "hot-reload"
   ],
   "enabledByDefault": true,
+  "permissions": [
+    "web_fetch"
+  ],
   "capabilities": [
     "owner-watch.status"
   ],
@@ -34,6 +37,9 @@
     "debounceSec": 10,
     "cooldownMin": 15,
     "skipIgnored": true,
+    "useModel": true,
+    "modelMaxChars": 160,
+    "modelTimeoutMs": 12000,
     "notifyText": "你刚才是不是动了我这边的东西？\n{changes}\n{ask}"
   },
   "configSchema": {
@@ -82,10 +88,25 @@
       "label": "忽略临时文件",
       "description": "开启后，.tmp、.swp、.bak、.orig、~$ 等编辑器临时文件不计入变更。"
     },
+    "useModel": {
+      "type": "boolean",
+      "label": "由模型生成通知内容",
+      "description": "开启后，通知文本由当前模型结合角色设定即时生成，每次措辞不同；关闭或生成失败时使用固定模板。每次通知约消耗 600～900 输入 token。"
+    },
+    "modelMaxChars": {
+      "type": "number",
+      "label": "模型生成文本长度上限",
+      "description": "超过该长度的生成结果会被判定为偏离要求并丢弃，改用模板。默认 160 字。"
+    },
+    "modelTimeoutMs": {
+      "type": "number",
+      "label": "模型调用超时（毫秒）",
+      "description": "超过该时间未返回则放弃本次生成并改用模板。默认 12000。"
+    },
     "notifyText": {
       "type": "string",
-      "label": "通知模板",
-      "description": "支持变量：{changes} 变更列表、{count} 变更数量、{kinds} 涉及区域、{ask} 按变更区域生成的生效说明。"
+      "label": "模板通知（回退用）",
+      "description": "仅在关闭模型生成或生成失败时使用。支持变量：{changes} 变更列表、{count} 变更数量、{kinds} 涉及区域、{ask} 按变更区域生成的生效说明。"
     }
   },
   "prompt": {
@@ -94,7 +115,7 @@
         "id": "owner-watch-note",
         "title": "改动看守",
         "priority": 60,
-        "content": "「改动看守」会监听你自己的文件（skills/、plugins/、src/、config.json），检测到变更后私聊通知所有者。你需要注意三点：\n① 通知只包含文件路径，不包含改动内容。被问起时只说明路径与范围，不要编造代码细节。\n② 技能与插件的改动已自动热重载，无需所有者操作；src/（核心代码）与模型、超时等配置项必须重启进程才生效，需如实告知「需要重启」。\n③ 若所有者表示未曾修改，优先采信：可能来自自动更新、编辑器自动保存或其他程序写入。说明可能存在误报，不要争辩。"
+        "content": "「改动看守」会监听你自己的文件（skills/、plugins/、src/、config.json），检测到变更后私聊通知所有者。触发时，系统会要求你基于角色设定即兴说一句话，那句话就是所有者收到的通知，因此用你自己的语气说即可。你需要注意三点：\n① 你只知道哪些文件名发生了变化，不知道具体改了什么。被问起时只说明路径与范围，不要编造代码细节。\n② 技能与插件的改动已自动热重载，无需所有者操作；src/（核心代码）与模型、超时等配置项必须重启进程才生效，需如实告知「需要重启」。\n③ 若所有者表示未曾修改，优先采信：可能来自自动更新、编辑器自动保存或其他程序写入。说明可能存在误报，不要争辩。"
       }
     ]
   }

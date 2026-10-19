@@ -1,13 +1,17 @@
-// owner-watch 自测。仅验证纯逻辑，不调用模型，不发起网络请求。
-// 运行方式：node selftest.mjs
+// Self-test for owner-watch. Pure logic only: no model calls, no network.
+// Run: node selftest.mjs
 //
-// 说明：涉及实际扫描范围的三条断言需要一个可用的 QQ Agent 宿主目录
-// （即本插件被放置在 <安装目录>/resources/app/plugins/owner-watch/ 时）。
-// 在独立克隆的仓库中运行时，这三条断言会被跳过，其余断言正常执行。
+// Note: three assertions cover the real scan scope and require a live QQ Agent
+// host layout (this plugin placed at <install>/resources/app/plugins/owner-watch/).
+// When run from a standalone clone those assertions are skipped and the rest
+// still execute.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { diffSnapshots, buildMessage, totalChanges, mergeDiff, missingPrefixes, internals } from './index.js';
+import {
+  diffSnapshots, buildMessage, totalChanges, mergeDiff, missingPrefixes,
+  sanitizeNotice, internals
+} from './index.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = path.resolve(HERE, '..', '..');
@@ -17,160 +21,161 @@ let pass = 0;
 let fail = 0;
 function ok(name, cond, extra = '') {
   if (cond) { pass++; console.log(`  ok   ${name}`); }
-  else { fail++; console.log(`  FAIL ${name}${extra ? ' — ' + extra : ''}`); }
+  else { fail++; console.log(`  FAIL ${name}${extra ? ' - ' + extra : ''}`); }
 }
 
-console.log('[1] 快照差异识别');
+console.log('[1] snapshot diff');
 {
   const a = { 'skills/x/index.js': '1:10', 'skills/y/index.js': '1:10', 'config.json': 'sha1:old' };
   const b = { 'skills/x/index.js': '2:20', 'config.json': 'sha1:old', 'plugins/new/index.js': '1:5' };
   const d = diffSnapshots(a, b);
-  ok('识别新增', d.added.length === 1 && d.added[0] === 'plugins/new/index.js');
-  ok('识别删除', d.removed.length === 1 && d.removed[0] === 'skills/y/index.js');
-  ok('识别修改', d.changed.length === 1 && d.changed[0] === 'skills/x/index.js');
-  ok('总数=3', totalChanges(d) === 3);
-  ok('无变化返回空', totalChanges(diffSnapshots(a, { ...a })) === 0);
-  ok('null 快照返回完整差异', totalChanges(diffSnapshots(null, a)) === 3);
+  ok('added detected', d.added.length === 1 && d.added[0] === 'plugins/new/index.js');
+  ok('removed detected', d.removed.length === 1 && d.removed[0] === 'skills/y/index.js');
+  ok('changed detected', d.changed.length === 1 && d.changed[0] === 'skills/x/index.js');
+  ok('total is 3', totalChanges(d) === 3);
+  ok('identical snapshots yield nothing', totalChanges(diffSnapshots(a, { ...a })) === 0);
+  ok('null snapshot returns full diff', totalChanges(diffSnapshots(null, a)) === 3);
 }
 
-console.log('[2] 差异合并');
+console.log('[2] diff merge');
 {
   const a = { added: ['skills/x/index.js'], removed: [], changed: [] };
   const b = { added: [], removed: [], changed: ['plugins/p/index.js'] };
   const m = mergeDiff(a, b);
-  ok('新增 + 改动都留下', m.added.length === 1 && m.changed.length === 1, JSON.stringify(m));
-  ok('总数=2', totalChanges(m) === 2);
+  ok('queued and new both kept', m.added.length === 1 && m.changed.length === 1, JSON.stringify(m));
+  ok('total is 2', totalChanges(m) === 2);
 
-  // 先新增后删除 → 净效果删除
   const c = mergeDiff({ added: ['skills/t/index.js'], removed: [], changed: [] },
     { added: [], removed: ['skills/t/index.js'], changed: [] });
-  ok('先增后删=删', c.added.length === 0 && c.removed.length === 1, JSON.stringify(c));
+  ok('add then remove resolves to remove', c.added.length === 0 && c.removed.length === 1, JSON.stringify(c));
 
-  // 先删除后新增（同路径重建）→ 净效果新增
   const d = mergeDiff({ added: [], removed: ['skills/r/index.js'], changed: [] },
     { added: ['skills/r/index.js'], removed: [], changed: [] });
-  ok('先删后增=增', d.added.length === 1 && d.removed.length === 0, JSON.stringify(d));
+  ok('remove then add resolves to add', d.added.length === 1 && d.removed.length === 0, JSON.stringify(d));
 
-  // 已在新增里的文件又被"改动"→ 不重复算
   const e = mergeDiff({ added: ['skills/n/index.js'], removed: [], changed: [] },
     { added: [], removed: [], changed: ['skills/n/index.js'] });
-  ok('新增项不计入改动项', e.added.length === 1 && e.changed.length === 0, JSON.stringify(e));
+  ok('added file is not double counted as changed', e.added.length === 1 && e.changed.length === 0, JSON.stringify(e));
 
-  ok('null 输入返回空差异', totalChanges(mergeDiff(null, null)) === 0);
+  ok('null input returns empty diff', totalChanges(mergeDiff(null, null)) === 0);
 }
 
-console.log('[3] 基线覆盖判定');
+console.log('[3] baseline coverage');
 {
   const fresh = { 'skills/a/index.js': '1:1', 'plugins/b/index.js': '1:1', 'src/app.js': '1:1', 'config.json': 'sha1:x' };
 
-  // 老基线只有 skills/plugins → 缺 src/，必须重建
   const oldBase = { 'skills/a/index.js': '1:1', 'plugins/b/index.js': '1:1', 'config.json': 'sha1:x' };
   const miss1 = missingPrefixes(oldBase, {}, fresh);
-  ok('旧基线缺少 src/ 时判定为不完整', miss1.includes('src/'), JSON.stringify(miss1));
+  ok('baseline without src/ is incomplete', miss1.includes('src/'), JSON.stringify(miss1));
 
-  // 覆盖齐全 → 不算缺失
   const miss2 = missingPrefixes(fresh, {}, fresh);
-  ok('覆盖齐全时不重建', miss2.length === 0, JSON.stringify(miss2));
+  ok('fully covered baseline needs no rebuild', miss2.length === 0, JSON.stringify(miss2));
 
-  // 目录真的是空的（新扫描也没有）→ 不能判缺失，否则每轮都重建
-  const emptyCfg = {};
-  const miss3 = missingPrefixes({ 'skills/a/index.js': '1:1' }, emptyCfg, { 'skills/a/index.js': '1:1' });
-  ok('空目录不计为缺失', miss3.length === 0, JSON.stringify(miss3));
+  const miss3 = missingPrefixes({ 'skills/a/index.js': '1:1' }, {}, { 'skills/a/index.js': '1:1' });
+  ok('empty directory is not counted as missing', miss3.length === 0, JSON.stringify(miss3));
 
-  // 关掉 src 监听后，基线里没 src 也不该重建
   const miss4 = missingPrefixes(oldBase, { watchSrc: false }, fresh);
-  ok('关掉 src 监听就不要求它', !miss4.includes('src/'), JSON.stringify(miss4));
+  ok('disabled root is not required', !miss4.includes('src/'), JSON.stringify(miss4));
 }
 
-console.log('[4] 通知文案生成');
+console.log('[4] template notification');
 {
-  // 新装一个技能（目录里所有文件都是新增）
   const d1 = { added: ['skills/video-frames/index.js', 'skills/video-frames/plugin.json'], removed: [], changed: [] };
   const m1 = buildMessage(d1, {});
-  ok('文案包含新增技能条目', m1.text.includes('多了个技能：video-frames'), m1.text);
-  ok('带上询问', m1.text.includes('自动重新加载'), m1.text);
-  ok('kinds 含技能', m1.kinds.includes('技能'));
+  ok('new skill entry present', m1.text.includes('多了个技能：video-frames'), m1.text);
+  ok('hot reload wording used', m1.text.includes('自动重新加载'), m1.text);
+  ok('kinds includes skill', m1.kinds.includes('技能'));
 
-  // 删掉一个插件
   const d2 = { added: [], removed: ['plugins/old/index.js'], changed: [] };
   const m2 = buildMessage(d2, {});
-  ok('文案包含删除插件条目', m2.text.includes('删了个插件：old'), m2.text);
+  ok('removed plugin entry present', m2.text.includes('删了个插件：old'), m2.text);
 
-  // 只改设置
   const d3 = { added: [], removed: [], changed: ['config.json'] };
   const m3 = buildMessage(d3, {});
-  ok('文案包含配置变更条目', m3.text.includes('改了我的设置'), m3.text);
-  ok('设置类询问措辞', m3.text.includes('重启我才吃进去'), m3.text);
+  ok('config change entry present', m3.text.includes('改了我的设置'), m3.text);
+  ok('config wording mentions restart', m3.text.includes('重启'), m3.text);
 
-  // 改了一行插件代码 → 不是新增也不是删除
   const d4 = { added: [], removed: [], changed: ['plugins/share-card/index.js'] };
   const m4 = buildMessage(d4, {});
-  ok('文案包含插件修改条目', m4.text.includes('改动了插件：share-card'), m4.text);
+  ok('modified plugin entry present', m4.text.includes('改动了插件：share-card'), m4.text);
 
-  // 改了核心代码 → 必须明说"得重启"，且不能说"我自动重载了"
   const d5 = { added: [], removed: [], changed: ['src/orchestrator.js', 'src/tools.js'] };
   const m5 = buildMessage(d5, {});
-  ok('文案包含核心代码变更条目', m5.text.includes('身体里的东西'), m5.text);
-  ok('核心改动要求重启', m5.text.includes('重启我一次'), m5.text);
-  ok('核心改动不说自动重载', !m5.text.includes('自动重新加载'), m5.text);
-  ok('kinds 含核心', m5.kinds.includes('核心'));
+  ok('core change entry present', m5.text.includes('身体里的东西'), m5.text);
+  ok('core change requires restart', m5.text.includes('重启我一次'), m5.text);
+  ok('core change does not claim auto reload', !m5.text.includes('自动重新加载'), m5.text);
+  ok('kinds includes core', m5.kinds.includes('核心'));
 
-  // 仅修改技能：文案应说明自动重载，不要求重启
-  const d6 = { added: [], removed: [], changed: ['skills/trendy-memes/skill.json'] };
-  const m6 = buildMessage(d6, {});
-  ok('技能改动用自动重载措辞', m6.text.includes('自动重新加载'), m6.text);
-
-  // 超长消息要收口（QQ 单条有长度限制）
   const huge = { added: Array.from({ length: 200 }, (_, i) => `skills/hugely-named-skill-${i}/index.js`), removed: [], changed: [] };
   const m7 = buildMessage(huge, {});
-  ok('超长消息被截断', m7.text.length <= 900, `len=${m7.text.length}`);
+  ok('oversized text is truncated', m7.text.length <= 900, `len=${m7.text.length}`);
 
-  // 无改动不产生消息
   const m8 = buildMessage({ added: [], removed: [], changed: [] }, {});
-  ok('无改动输出空', m8.text === '' && m8.count === 0);
+  ok('empty diff produces no text', m8.text === '' && m8.count === 0);
 
-  // 超量截断（列表层面）
   const many = { added: Array.from({ length: 30 }, (_, i) => `skills/s${i}/index.js`), removed: [], changed: [] };
   const m9 = buildMessage(many, {});
-  ok('最多列 8 项 + 余量提示', m9.text.includes('还有 22 项'), m9.text);
+  ok('list capped with remainder note', m9.text.includes('还有 22 项'), m9.text);
 
-  // 自定义模板
   const m10 = buildMessage(d1, { notifyText: '动了 {count} 个文件（{kinds}）\n{changes}' });
-  ok('模板变量生效', m10.text.includes('动了 2 个文件（技能）'), m10.text);
+  ok('template variables substituted', m10.text.includes('动了 2 个文件（技能）'), m10.text);
 }
 
-console.log('[5] 扫描范围与忽略规则');
+console.log('[5] model output sanitizing');
+{
+  ok('plain text unchanged', sanitizeNotice('又是你？') === '又是你？');
+  ok('surrounding quotes removed', sanitizeNotice('"又是你？"') === '又是你？', sanitizeNotice('"又是你？"'));
+  ok('cjk quotes removed', sanitizeNotice('「又是你？」') === '又是你？', sanitizeNotice('「又是你？」'));
+  ok('acknowledgement prefix removed', sanitizeNotice('好的，又是你？') === '又是你？', sanitizeNotice('好的，又是你？'));
+  ok('prefix then quoted', sanitizeNotice('好的，「又是你？」') === '又是你？', sanitizeNotice('好的，「又是你？」'));
+  ok('code fence removed', sanitizeNotice('```\n又是你？\n```') === '又是你？', sanitizeNotice('```\n又是你？\n```'));
+  ok('overlong output rejected', sanitizeNotice('啊'.repeat(300)) === '');
+  ok('empty output rejected', sanitizeNotice('   ') === '');
+  ok('blank lines collapsed', sanitizeNotice('第一句\n\n\n第二句').split('\n').length === 2);
+}
+
+console.log('[6] composeNotice fallback');
+{
+  // useModel:false must not touch the model and must return the template.
+  const r1 = await internals.composeNotice({ added: ['skills/x/index.js'], removed: [], changed: [] }, { useModel: false });
+  ok('model disabled uses template', r1.source === 'template', r1.source);
+  ok('template text still produced', r1.text.includes('多了个技能：x'), r1.text);
+
+  const r2 = await internals.composeNotice({ added: [], removed: [], changed: [] }, { useModel: true });
+  ok('no changes yields no notice', r2.count === 0 && r2.text === '', JSON.stringify(r2));
+}
+
+console.log('[7] scan scope and ignore rules');
 {
   const st = internals.loadState();
-  ok('状态可读（首次为空）', st.files === null || typeof st.files === 'object');
+  ok('state readable', st.files === null || typeof st.files === 'object');
   const snap = internals.snapshot();
   const keys = Object.keys(snap);
   if (IN_HOST) {
-    ok('扫描到文件', keys.length > 10, `只有 ${keys.length}`);
-    ok('只含四处范围', keys.every((k) => k.startsWith('skills/') || k.startsWith('plugins/') || k.startsWith('src/') || k === 'config.json'), keys.find((k) => !(k.startsWith('skills/') || k.startsWith('plugins/') || k.startsWith('src/') || k === 'config.json')));
-    ok('覆盖核心代码 src/', keys.some((k) => k.startsWith('src/')), '没扫到 src/');
-    // 仅排除运行数据目录，避免误伤 src/ 下的核心文件（例如 src/sessions.js 属于核心代码）
-    ok('不含运行数据', !keys.some((k) => /^(logs|sessions|messages|video-cache|sticker-images)\//.test(k) || /jm-suomingor\/jm-/.test(k)), keys.filter((k) => /^(logs|sessions|messages|video-cache|sticker-images)\//.test(k) || /jm-suomingor\/jm-/.test(k)).slice(0, 3).join(','));
-    ok('排除临时文件', !keys.some((k) => /\.(swp|swx|tmp|temp|bak|log|orig|rej)([-.]|$)/.test(k)), keys.filter((k) => /\.(swp|swx|tmp|temp|bak|log|orig|rej)([-.]|$)/.test(k)).slice(0, 3).join(','));
-    ok('config.json 用哈希', !snap['config.json'] || snap['config.json'].startsWith('sha1:'));
+    ok('files scanned', keys.length > 10, `only ${keys.length}`);
+    ok('only watched roots present', keys.every((k) => k.startsWith('skills/') || k.startsWith('plugins/') || k.startsWith('src/') || k === 'config.json'), keys.find((k) => !(k.startsWith('skills/') || k.startsWith('plugins/') || k.startsWith('src/') || k === 'config.json')));
+    ok('core code covered', keys.some((k) => k.startsWith('src/')), 'src/ not found');
+    // Runtime data only: src/sessions.js and similar are core code and must stay.
+    ok('runtime data excluded', !keys.some((k) => /^(logs|sessions|messages|video-cache|sticker-images)\//.test(k) || /jm-suomingor\/jm-/.test(k)), keys.filter((k) => /^(logs|sessions|messages|video-cache|sticker-images)\//.test(k) || /jm-suomingor\/jm-/.test(k)).slice(0, 3).join(','));
+    ok('temporary files excluded', !keys.some((k) => /\.(swp|swx|tmp|temp|bak|log|orig|rej)([-.]|$)/.test(k)), keys.filter((k) => /\.(swp|swx|tmp|temp|bak|log|orig|rej)([-.]|$)/.test(k)).slice(0, 3).join(','));
+    ok('config compared by hash', !snap['config.json'] || snap['config.json'].startsWith('sha1:'));
   } else {
-    console.log('  skip 扫描范围三条（当前不在 QQ Agent 宿主目录里，属预期）');
-    // 至少验证空快照不抛异常
-    ok('无宿主时快照为空且不报错', keys.length === 0, JSON.stringify(keys.slice(0, 3)));
+    console.log('  skip scope assertions (not inside a QQ Agent host layout)');
+    ok('empty snapshot when no host', keys.length === 0, JSON.stringify(keys.slice(0, 3)));
   }
 
-  // 状态往返：pending 必须活着回来（丢了就永远不发提醒）
+  // State round-trip: `pending` must survive, otherwise notices never fire.
   const before = internals.loadState();
   const probe = { added: ['skills/probe/index.js'], removed: [], changed: ['config.json'] };
   internals.saveState({ ...before, version: 1, at: 1, files: snap, lastNotifyAt: 0, pending: probe });
   const back = internals.loadState();
-  ok('pending 能存能读', totalChanges(back.pending) === 2, JSON.stringify(back.pending));
-  ok('pending 的 added 完整', back.pending.added.includes('skills/probe/index.js'));
-  // 恢复测试前的状态，避免污染真实基线（真实环境可能存有待发变更）
+  ok('pending persisted', totalChanges(back.pending) === 2, JSON.stringify(back.pending));
+  ok('pending added entry intact', back.pending.added.includes('skills/probe/index.js'));
+  // Restore the pre-test state so the real baseline is not polluted.
   internals.saveState(before);
   const restored = internals.loadState();
-  ok('状态可还原', totalChanges(restored.pending) === totalChanges(before.pending), `${totalChanges(restored.pending)} vs ${totalChanges(before.pending)}`);
+  ok('state restored', totalChanges(restored.pending) === totalChanges(before.pending), `${totalChanges(restored.pending)} vs ${totalChanges(before.pending)}`);
 }
 
-console.log(`\n===== 通过 ${pass}，失败 ${fail} =====`);
+console.log(`\n===== passed ${pass}, failed ${fail} =====`);
 process.exit(fail ? 1 : 0);
