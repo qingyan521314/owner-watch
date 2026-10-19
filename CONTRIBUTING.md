@@ -3,7 +3,7 @@
 ## 提交前检查
 
 ```bash
-node selftest.mjs        # 全部通过（宿主目录内 42 项，独立目录 37 项）
+node selftest.mjs        # 全部通过（宿主目录内 54 项，独立目录 49 项）
 node --check index.js    # 语法检查
 ```
 
@@ -18,8 +18,8 @@ node --check index.js    # 语法检查
 3. **仅读取文件属性**：扫描 `skills/`、`plugins/`、`src/` 时只读取 `stat` 信息。
    唯一例外是 `data/config.json`（用于计算哈希），不得扩展至其他文件。
 4. **仅写入自身目录**：所有写操作必须位于 `data/owner-watch/` 下。
-5. **不发起网络请求**：除宿主本机 OneBot 通道外，禁止任何网络访问，禁止遥测。
-6. **不产生 token 消耗**：不得在插件中调用模型，通知文案必须由本地模板生成。
+5. **网络访问受限**：除宿主本机 OneBot 通道与宿主提供的模型接口（`api.fetch`）外，禁止任何网络访问，禁止遥测。
+6. **模型调用仅用于生成通知文本**：必须由 `useModel` 开关控制、必须保留模板兜底、必须经 `sanitizeNotice` 校验；不得把模型用于其他用途，不得向模型发送文件内容或聊天内容。
 7. **不修改宿主核心代码**：仅可调用插件 API（`setup`、`activate`、`deactivate`、`hooks`、`providers`）。
 
 上述七条同时构成 `DISCLAIMER.md` 中"明确不具备的能力"的依据。任一条被违反，免责边界即不成立，相关 Pull Request 不予合并。
