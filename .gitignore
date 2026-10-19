@@ -1,0 +1,12 @@
+# 运行数据与依赖，别进仓库
+node_modules/
+data/
+*.log
+*.log.*
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

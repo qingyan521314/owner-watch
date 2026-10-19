@@ -1,0 +1,89 @@
+{
+  "id": "owner-watch",
+  "name": "改动看守（主人动了她的东西会问一句）",
+  "version": "1.1.0",
+  "apiVersion": 1,
+  "category": "utility",
+  "entry": "index.js",
+  "description": "只盯着「她自己相关的文件」——skills/、plugins/、src/（核心）和 config.json。主人给她加技能、改插件代码、动核心、改设置之后，她会私下问一句，并且**分清这次改动要不要重启**：技能/插件她自己就热重载了，改核心则明说「得你重启我一次」。不监听聊天记录、日志、下载文件，也不监听电脑上其它任何目录。去抖 10 秒 + 冷却 15 分钟 + 忽略临时文件，不会刷屏；提醒发不出去会重试 3 次而不是默默吞掉。全程本地比对，0 token。",
+  "author": "本机定制",
+  "enabledByDefault": true,
+  "capabilities": [
+    "owner-watch.status"
+  ],
+  "requires": [],
+  "settings": {
+    "enabled": true,
+    "ownerId": "",
+    "watchSkills": true,
+    "watchPlugins": true,
+    "watchSrc": true,
+    "watchConfig": true,
+    "debounceSec": 10,
+    "cooldownMin": 15,
+    "skipIgnored": true,
+    "notifyText": "你刚才是不是动了我这边的东西？\n{changes}\n{ask}"
+  },
+  "configSchema": {
+    "enabled": {
+      "type": "boolean",
+      "label": "启用改动看守",
+      "description": "关掉后不再监听任何文件，也不会私聊你。"
+    },
+    "ownerId": {
+      "type": "string",
+      "label": "通知谁（主人 QQ 号）",
+      "description": "留空 = 自动用「主人识别」里配的号；都没有就只写日志、不发消息。"
+    },
+    "watchSkills": {
+      "type": "boolean",
+      "label": "盯技能目录（skills/）",
+      "description": "新增/删除/修改技能文件时提醒。关掉就不看这一块。"
+    },
+    "watchPlugins": {
+      "type": "boolean",
+      "label": "盯插件目录（plugins/）",
+      "description": "新增/删除/修改插件文件时提醒。"
+    },
+    "watchSrc": {
+      "type": "boolean",
+      "label": "盯核心代码（src/）",
+      "description": "改了核心（对话流程、工具、协议适配）时提醒。这部分热重载不生效，必须重启程序才算数——所以提醒里会单独说明。"
+    },
+    "watchConfig": {
+      "type": "boolean",
+      "label": "盯设置文件（config.json）",
+      "description": "设置被改动时提醒（包括在控制台改开关、改模型、改人设）。"
+    },
+    "debounceSec": {
+      "type": "number",
+      "label": "安静多少秒后才说话（秒）",
+      "description": "改代码常常连着改好几个文件，等它停手再说，避免一条一条刷屏。默认 10 秒。"
+    },
+    "cooldownMin": {
+      "type": "number",
+      "label": "两次提醒至少间隔（分钟）",
+      "description": "默认 15 分钟。防止反复保存文件把她变成复读机。冷却期间的改动会攒着，不会丢。"
+    },
+    "skipIgnored": {
+      "type": "boolean",
+      "label": "忽略临时文件",
+      "description": "开启后 .tmp / .swp / ~$开头 / .bak / .orig 这类编辑器临时文件不计入改动。"
+    },
+    "notifyText": {
+      "type": "string",
+      "label": "提醒文案模板",
+      "description": "可用变量：{changes} 改了什么（多行）、{count} 改了几个文件、{kinds} 涉及哪些区域、{ask} 一句符合实际情况的询问（热重载能解决 → 说已经自己加载了；改了 src/ → 说必须重启）。"
+    }
+  },
+  "prompt": {
+    "sections": [
+      {
+        "id": "owner-watch-note",
+        "title": "改动看守",
+        "priority": 60,
+        "content": "「改动看守」会盯着你自己的文件（skills/、plugins/、src/、config.json），主人动过就私聊他一句。你要知道三件事：\n① 你只看到「哪个文件变了」，看不到改了什么内容、哪一行——被问起时只说路径和范围，绝不编造代码细节。\n② 技能和插件的改动已经自动热重载，不用主人动手；改了 src/（你的核心代码）或模型/超时这类设置，必须重启程序才生效，要如实告诉他「得重启」。\n③ 如果主人说「没动过」，先信他：可能是自动更新、编辑器保存，或你自己写文件造成的；不要跟他争，说一句「那可能是我看岔了」即可。"
+      }
+    ]
+  }
+}
