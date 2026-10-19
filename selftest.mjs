@@ -1,6 +1,17 @@
 // 改动看守 · 自测（不进模型、不联网，只验证纯逻辑）
 // 跑法：node selftest.mjs
+//
+// 注意：涉及"真实扫描范围"的三条断言需要一个 QQ Agent 宿主目录
+// （本插件被放在 <安装目录>/resources/app/plugins/owner-watch/ 时才算）。
+// 单独 clone 仓库跑自测时自动跳过它们，其余逻辑断言照常全跑。
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { diffSnapshots, buildMessage, totalChanges, mergeDiff, missingPrefixes, internals } from './index.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const APP_ROOT = path.resolve(HERE, '..', '..');
+const IN_HOST = ['skills', 'plugins', 'src'].some((d) => fs.existsSync(path.join(APP_ROOT, d)));
 
 let pass = 0;
 let fail = 0;
@@ -134,13 +145,19 @@ console.log("[4] 忽略规则");
   ok('状态可读（首次为空）', st.files === null || typeof st.files === 'object');
   const snap = internals.snapshot();
   const keys = Object.keys(snap);
-  ok('扫描到文件', keys.length > 10, `只有 ${keys.length}`);
-  ok('只含三处范围', keys.every((k) => k.startsWith('skills/') || k.startsWith('plugins/') || k.startsWith('src/') || k === 'config.json'), keys.find((k) => !(k.startsWith('skills/') || k.startsWith('plugins/') || k.startsWith('src/') || k === 'config.json')));
-  ok('覆盖核心代码 src/', keys.some((k) => k.startsWith('src/')), '没扫到 src/');
-  // 只排除"运行数据"，别误伤 src/ 下的真核心文件（例如 src/sessions.js 是她身体的一部分）
-  ok('不含运行数据', !keys.some((k) => /^(logs|sessions|messages|video-cache|sticker-images)\//.test(k) || /jm-suomingor\/jm-/.test(k)), keys.filter((k) => /^(logs|sessions|messages|video-cache|sticker-images)\//.test(k) || /jm-suomingor\/jm-/.test(k)).slice(0, 3).join(','));
-  ok('排除临时文件', !keys.some((k) => /\.(swp|swx|tmp|temp|bak|log|orig|rej)([-.]|$)/.test(k)), keys.filter((k) => /\.(swp|swx|tmp|temp|bak|log|orig|rej)([-.]|$)/.test(k)).slice(0, 3).join(','));
-  ok('config.json 用哈希', !snap['config.json'] || snap['config.json'].startsWith('sha1:'));
+  if (IN_HOST) {
+    ok('扫描到文件', keys.length > 10, `只有 ${keys.length}`);
+    ok('只含四处范围', keys.every((k) => k.startsWith('skills/') || k.startsWith('plugins/') || k.startsWith('src/') || k === 'config.json'), keys.find((k) => !(k.startsWith('skills/') || k.startsWith('plugins/') || k.startsWith('src/') || k === 'config.json')));
+    ok('覆盖核心代码 src/', keys.some((k) => k.startsWith('src/')), '没扫到 src/');
+    // 只排除"运行数据"，别误伤 src/ 下的真核心文件（例如 src/sessions.js 是她身体的一部分）
+    ok('不含运行数据', !keys.some((k) => /^(logs|sessions|messages|video-cache|sticker-images)\//.test(k) || /jm-suomingor\/jm-/.test(k)), keys.filter((k) => /^(logs|sessions|messages|video-cache|sticker-images)\//.test(k) || /jm-suomingor\/jm-/.test(k)).slice(0, 3).join(','));
+    ok('排除临时文件', !keys.some((k) => /\.(swp|swx|tmp|temp|bak|log|orig|rej)([-.]|$)/.test(k)), keys.filter((k) => /\.(swp|swx|tmp|temp|bak|log|orig|rej)([-.]|$)/.test(k)).slice(0, 3).join(','));
+    ok('config.json 用哈希', !snap['config.json'] || snap['config.json'].startsWith('sha1:'));
+  } else {
+    console.log('  skip 扫描范围三条（当前不在 QQ Agent 宿主目录里，属预期）');
+    // 至少验证"空快照不会炸"
+    ok('无宿主时快照为空且不报错', keys.length === 0, JSON.stringify(keys.slice(0, 3)));
+  }
 
   // 状态往返：pending 必须活着回来（丢了就永远不发提醒）
   const before = internals.loadState();
