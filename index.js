@@ -736,9 +736,13 @@ async function tick() {
         + `sample ${[...diff.added, ...diff.removed, ...diff.changed].slice(0, 3).join(', ')}`);
     }
 
-    // 去抖：记录首次观察到变更的时间，等待 debounceSec 秒
-    // Debounce: remember when the first change was observed.
-    if (!pendingSince) pendingSince = now;
+    // 去抖：每当观察到新变更就重新计时，只有停止变更 debounceSec 秒后才发送。
+    // 若只记录"首次"变更时间，连续修改超过 debounceSec 秒时会在尚未停手时
+    // 提前发出第一条。这里用"最近一次观察到变更"作为基准，实现真正的停手去抖。
+    // Debounce: reset the timer on every newly observed change, so a notice is
+    // sent only after changes stop for debounceSec seconds. Tracking only the
+    // first change would fire early while edits are still ongoing.
+    if (totalChanges(diff)) pendingSince = now;
     const waitMs = num(cfg.debounceSec, 10, 0, 600) * 1000;
     if (now - pendingSince < waitMs) {
       // 尚未静默：推进快照，变更暂存至待发队列
