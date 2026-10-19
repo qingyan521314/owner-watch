@@ -6,7 +6,19 @@
   "category": "utility",
   "entry": "index.js",
   "description": "只盯着「她自己相关的文件」——skills/、plugins/、src/（核心）和 config.json。主人给她加技能、改插件代码、动核心、改设置之后，她会私下问一句，并且**分清这次改动要不要重启**：技能/插件她自己就热重载了，改核心则明说「得你重启我一次」。不监听聊天记录、日志、下载文件，也不监听电脑上其它任何目录。去抖 10 秒 + 冷却 15 分钟 + 忽略临时文件，不会刷屏；提醒发不出去会重试 3 次而不是默默吞掉。全程本地比对，0 token。",
-  "author": "本机定制",
+  "author": "qingyan521314",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qingyan521314/owner-watch.git"
+  },
+  "license": "MIT",
+  "keywords": [
+    "qq-agent",
+    "plugin",
+    "introspection",
+    "file-watch",
+    "hot-reload"
+  ],
   "enabledByDefault": true,
   "capabilities": [
     "owner-watch.status"
