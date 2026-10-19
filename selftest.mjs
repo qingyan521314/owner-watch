@@ -1,10 +1,14 @@
+// owner-watch 自测。仅验证纯逻辑：不调用模型，不发起网络请求。
 // Self-test for owner-watch. Pure logic only: no model calls, no network.
+// 运行方式：node selftest.mjs
 // Run: node selftest.mjs
 //
-// Note: three assertions cover the real scan scope and require a live QQ Agent
-// host layout (this plugin placed at <install>/resources/app/plugins/owner-watch/).
-// When run from a standalone clone those assertions are skipped and the rest
-// still execute.
+// 说明：涉及实际扫描范围的断言需要一个可用的 QQ Agent 宿主目录
+// （即本插件被放置在 <安装目录>/resources/app/plugins/owner-watch/ 时）。
+// 在独立克隆的仓库中运行时，这些断言会被跳过，其余断言正常执行。
+// Note: assertions covering the real scan scope require a live QQ Agent host
+// layout (this plugin placed at <install>/resources/app/plugins/owner-watch/).
+// When run from a standalone clone they are skipped and the rest still run.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -126,6 +130,7 @@ console.log('[5] model output sanitizing');
   ok('plain text unchanged', sanitizeNotice('又是你？') === '又是你？');
   ok('surrounding quotes removed', sanitizeNotice('"又是你？"') === '又是你？', sanitizeNotice('"又是你？"'));
   ok('cjk quotes removed', sanitizeNotice('「又是你？」') === '又是你？', sanitizeNotice('「又是你？」'));
+  ok('cjk corner quotes removed', sanitizeNotice('“又是你？”') === '又是你？', sanitizeNotice('“又是你？”'));
   ok('acknowledgement prefix removed', sanitizeNotice('好的，又是你？') === '又是你？', sanitizeNotice('好的，又是你？'));
   ok('prefix then quoted', sanitizeNotice('好的，「又是你？」') === '又是你？', sanitizeNotice('好的，「又是你？」'));
   ok('code fence removed', sanitizeNotice('```\n又是你？\n```') === '又是你？', sanitizeNotice('```\n又是你？\n```'));
@@ -136,6 +141,7 @@ console.log('[5] model output sanitizing');
 
 console.log('[6] composeNotice fallback');
 {
+  // useModel:false 时不得调用模型，必须返回模板。
   // useModel:false must not touch the model and must return the template.
   const r1 = await internals.composeNotice({ added: ['skills/x/index.js'], removed: [], changed: [] }, { useModel: false });
   ok('model disabled uses template', r1.source === 'template', r1.source);
@@ -155,6 +161,7 @@ console.log('[7] scan scope and ignore rules');
     ok('files scanned', keys.length > 10, `only ${keys.length}`);
     ok('only watched roots present', keys.every((k) => k.startsWith('skills/') || k.startsWith('plugins/') || k.startsWith('src/') || k === 'config.json'), keys.find((k) => !(k.startsWith('skills/') || k.startsWith('plugins/') || k.startsWith('src/') || k === 'config.json')));
     ok('core code covered', keys.some((k) => k.startsWith('src/')), 'src/ not found');
+    // 仅排除运行数据目录；src/sessions.js 这类属于核心代码，必须保留。
     // Runtime data only: src/sessions.js and similar are core code and must stay.
     ok('runtime data excluded', !keys.some((k) => /^(logs|sessions|messages|video-cache|sticker-images)\//.test(k) || /jm-suomingor\/jm-/.test(k)), keys.filter((k) => /^(logs|sessions|messages|video-cache|sticker-images)\//.test(k) || /jm-suomingor\/jm-/.test(k)).slice(0, 3).join(','));
     ok('temporary files excluded', !keys.some((k) => /\.(swp|swx|tmp|temp|bak|log|orig|rej)([-.]|$)/.test(k)), keys.filter((k) => /\.(swp|swx|tmp|temp|bak|log|orig|rej)([-.]|$)/.test(k)).slice(0, 3).join(','));
@@ -164,6 +171,7 @@ console.log('[7] scan scope and ignore rules');
     ok('empty snapshot when no host', keys.length === 0, JSON.stringify(keys.slice(0, 3)));
   }
 
+  // 状态往返：pending 必须能存能读，否则通知永不触发。
   // State round-trip: `pending` must survive, otherwise notices never fire.
   const before = internals.loadState();
   const probe = { added: ['skills/probe/index.js'], removed: [], changed: ['config.json'] };
@@ -171,6 +179,7 @@ console.log('[7] scan scope and ignore rules');
   const back = internals.loadState();
   ok('pending persisted', totalChanges(back.pending) === 2, JSON.stringify(back.pending));
   ok('pending added entry intact', back.pending.added.includes('skills/probe/index.js'));
+  // 恢复测试前的状态，避免污染真实基线。
   // Restore the pre-test state so the real baseline is not polluted.
   internals.saveState(before);
   const restored = internals.loadState();
