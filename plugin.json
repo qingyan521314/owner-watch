@@ -1,11 +1,11 @@
 {
   "id": "owner-watch",
-  "name": "改动看守（主人动了她的东西会问一句）",
+  "name": "改动看守",
   "version": "1.1.0",
   "apiVersion": 1,
   "category": "utility",
   "entry": "index.js",
-  "description": "盯她自己那几个文件夹：skills、plugins、src 和 config.json。你改完文件，她过十来秒私聊问一句，还知道你改的是哪一种。改技能和插件不用重启，改核心代码得重启，她会直说。不看聊天记录、日志、下载的文件，也不看你电脑上别的地方。停手十秒才汇总，两次提醒最少隔十五分钟，编辑器的临时文件不算，不会刷屏。消息发不出去会重试三次，不会悄悄吞掉。",
+  "description": "监听宿主自身的 skills、plugins、src 目录与 config.json，检测到变更后通过私聊通知所有者，并区分该变更是否需重启进程才能生效。不监听会话存档、运行日志、下载目录及其他路径。采用去抖（默认 10 秒）、冷却（默认 15 分钟）与临时文件过滤抑制重复通知；发送失败重试 3 次。",
   "author": "qingyan521314",
   "repository": {
     "type": "git",
@@ -40,52 +40,52 @@
     "enabled": {
       "type": "boolean",
       "label": "启用改动看守",
-      "description": "关掉后不再监听任何文件，也不会私聊你。"
+      "description": "关闭后不再执行任何扫描，也不再发送通知。"
     },
     "ownerId": {
       "type": "string",
-      "label": "通知谁（主人 QQ 号）",
-      "description": "留空 = 自动用「主人识别」里配的号；都没有就只写日志、不发消息。"
+      "label": "通知对象 QQ 号",
+      "description": "留空时自动使用「主人识别」（owner-identity）中配置的 QQ 号；两者均为空时仅写入日志，不发送通知。"
     },
     "watchSkills": {
       "type": "boolean",
-      "label": "盯技能目录（skills/）",
-      "description": "新增/删除/修改技能文件时提醒。关掉就不看这一块。"
+      "label": "监听 skills/ 目录",
+      "description": "技能文件的增删与修改将触发通知。"
     },
     "watchPlugins": {
       "type": "boolean",
-      "label": "盯插件目录（plugins/）",
-      "description": "新增/删除/修改插件文件时提醒。"
+      "label": "监听 plugins/ 目录",
+      "description": "插件文件的增删与修改将触发通知。"
     },
     "watchSrc": {
       "type": "boolean",
-      "label": "盯核心代码（src/）",
-      "description": "改了核心（对话流程、工具、协议适配）时提醒。这部分热重载不生效，必须重启程序才算数——所以提醒里会单独说明。"
+      "label": "监听 src/ 目录（核心代码）",
+      "description": "核心代码的修改将触发通知。该区域不受热重载影响，必须重启进程后生效，通知中会单独说明。"
     },
     "watchConfig": {
       "type": "boolean",
-      "label": "盯设置文件（config.json）",
-      "description": "设置被改动时提醒（包括在控制台改开关、改模型、改人设）。"
+      "label": "监听 config.json",
+      "description": "配置文件的修改将触发通知，包括在控制台调整的开关、模型与人设。"
     },
     "debounceSec": {
       "type": "number",
-      "label": "安静多少秒后才说话（秒）",
-      "description": "改代码常常连着改好几个文件，等它停手再说，避免一条一条刷屏。默认 10 秒。"
+      "label": "去抖时长（秒）",
+      "description": "连续修改多个文件时，等待停止变更该时长后汇总为一条通知。默认 10 秒。"
     },
     "cooldownMin": {
       "type": "number",
-      "label": "两次提醒至少间隔（分钟）",
-      "description": "默认 15 分钟。防止反复保存文件把她变成复读机。冷却期间的改动会攒着，不会丢。"
+      "label": "通知冷却（分钟）",
+      "description": "两次通知之间的最小间隔，默认 15 分钟。冷却期间产生的变更进入待发队列，不会丢失。"
     },
     "skipIgnored": {
       "type": "boolean",
       "label": "忽略临时文件",
-      "description": "开启后 .tmp / .swp / ~$开头 / .bak / .orig 这类编辑器临时文件不计入改动。"
+      "description": "开启后，.tmp、.swp、.bak、.orig、~$ 等编辑器临时文件不计入变更。"
     },
     "notifyText": {
       "type": "string",
-      "label": "提醒文案模板",
-      "description": "可用变量：{changes} 改了什么（多行）、{count} 改了几个文件、{kinds} 涉及哪些区域、{ask} 一句符合实际情况的询问（热重载能解决 → 说已经自己加载了；改了 src/ → 说必须重启）。"
+      "label": "通知模板",
+      "description": "支持变量：{changes} 变更列表、{count} 变更数量、{kinds} 涉及区域、{ask} 按变更区域生成的生效说明。"
     }
   },
   "prompt": {
@@ -94,7 +94,7 @@
         "id": "owner-watch-note",
         "title": "改动看守",
         "priority": 60,
-        "content": "「改动看守」会盯着你自己的文件（skills/、plugins/、src/、config.json），主人动过就私聊他一句。你要知道三件事：\n① 你只看到「哪个文件变了」，看不到改了什么内容、哪一行——被问起时只说路径和范围，绝不编造代码细节。\n② 技能和插件的改动已经自动热重载，不用主人动手；改了 src/（你的核心代码）或模型/超时这类设置，必须重启程序才生效，要如实告诉他「得重启」。\n③ 如果主人说「没动过」，先信他：可能是自动更新、编辑器保存，或你自己写文件造成的；不要跟他争，说一句「那可能是我看岔了」即可。"
+        "content": "「改动看守」会监听你自己的文件（skills/、plugins/、src/、config.json），检测到变更后私聊通知所有者。你需要注意三点：\n① 通知只包含文件路径，不包含改动内容。被问起时只说明路径与范围，不要编造代码细节。\n② 技能与插件的改动已自动热重载，无需所有者操作；src/（核心代码）与模型、超时等配置项必须重启进程才生效，需如实告知「需要重启」。\n③ 若所有者表示未曾修改，优先采信：可能来自自动更新、编辑器自动保存或其他程序写入。说明可能存在误报，不要争辩。"
       }
     ]
   }

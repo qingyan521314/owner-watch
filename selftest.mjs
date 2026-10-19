@@ -1,9 +1,9 @@
-// 改动看守 · 自测（不进模型、不联网，只验证纯逻辑）
-// 跑法：node selftest.mjs
+// owner-watch 自测。仅验证纯逻辑，不调用模型，不发起网络请求。
+// 运行方式：node selftest.mjs
 //
-// 注意：涉及"真实扫描范围"的三条断言需要一个 QQ Agent 宿主目录
-// （本插件被放在 <安装目录>/resources/app/plugins/owner-watch/ 时才算）。
-// 单独 clone 仓库跑自测时自动跳过它们，其余逻辑断言照常全跑。
+// 说明：涉及实际扫描范围的三条断言需要一个可用的 QQ Agent 宿主目录
+// （即本插件被放置在 <安装目录>/resources/app/plugins/owner-watch/ 时）。
+// 在独立克隆的仓库中运行时，这三条断言会被跳过，其余断言正常执行。
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,7 +20,7 @@ function ok(name, cond, extra = '') {
   else { fail++; console.log(`  FAIL ${name}${extra ? ' — ' + extra : ''}`); }
 }
 
-console.log('[1] 快照差异');
+console.log('[1] 快照差异识别');
 {
   const a = { 'skills/x/index.js': '1:10', 'skills/y/index.js': '1:10', 'config.json': 'sha1:old' };
   const b = { 'skills/x/index.js': '2:20', 'config.json': 'sha1:old', 'plugins/new/index.js': '1:5' };
@@ -30,10 +30,10 @@ console.log('[1] 快照差异');
   ok('识别修改', d.changed.length === 1 && d.changed[0] === 'skills/x/index.js');
   ok('总数=3', totalChanges(d) === 3);
   ok('无变化返回空', totalChanges(diffSnapshots(a, { ...a })) === 0);
-  ok('null 快照不炸', totalChanges(diffSnapshots(null, a)) === 3);
+  ok('null 快照返回完整差异', totalChanges(diffSnapshots(null, a)) === 3);
 }
 
-console.log('[2] 差异合并（攒起来的改动不能丢）');
+console.log('[2] 差异合并');
 {
   const a = { added: ['skills/x/index.js'], removed: [], changed: [] };
   const b = { added: [], removed: [], changed: ['plugins/p/index.js'] };
@@ -54,19 +54,19 @@ console.log('[2] 差异合并（攒起来的改动不能丢）');
   // 已在新增里的文件又被"改动"→ 不重复算
   const e = mergeDiff({ added: ['skills/n/index.js'], removed: [], changed: [] },
     { added: [], removed: [], changed: ['skills/n/index.js'] });
-  ok('新增不再重复算改动', e.added.length === 1 && e.changed.length === 0, JSON.stringify(e));
+  ok('新增项不计入改动项', e.added.length === 1 && e.changed.length === 0, JSON.stringify(e));
 
-  ok('空值不炸', totalChanges(mergeDiff(null, null)) === 0);
+  ok('null 输入返回空差异', totalChanges(mergeDiff(null, null)) === 0);
 }
 
-console.log('[2.5] 基线覆盖判定（防止升级后把老目录全报成新增）');
+console.log('[3] 基线覆盖判定');
 {
   const fresh = { 'skills/a/index.js': '1:1', 'plugins/b/index.js': '1:1', 'src/app.js': '1:1', 'config.json': 'sha1:x' };
 
   // 老基线只有 skills/plugins → 缺 src/，必须重建
   const oldBase = { 'skills/a/index.js': '1:1', 'plugins/b/index.js': '1:1', 'config.json': 'sha1:x' };
   const miss1 = missingPrefixes(oldBase, {}, fresh);
-  ok('老基线缺 src/ 被识别', miss1.includes('src/'), JSON.stringify(miss1));
+  ok('旧基线缺少 src/ 时判定为不完整', miss1.includes('src/'), JSON.stringify(miss1));
 
   // 覆盖齐全 → 不算缺失
   const miss2 = missingPrefixes(fresh, {}, fresh);
@@ -75,47 +75,47 @@ console.log('[2.5] 基线覆盖判定（防止升级后把老目录全报成新�
   // 目录真的是空的（新扫描也没有）→ 不能判缺失，否则每轮都重建
   const emptyCfg = {};
   const miss3 = missingPrefixes({ 'skills/a/index.js': '1:1' }, emptyCfg, { 'skills/a/index.js': '1:1' });
-  ok('空目录不算缺失（防无限重建）', miss3.length === 0, JSON.stringify(miss3));
+  ok('空目录不计为缺失', miss3.length === 0, JSON.stringify(miss3));
 
   // 关掉 src 监听后，基线里没 src 也不该重建
   const miss4 = missingPrefixes(oldBase, { watchSrc: false }, fresh);
   ok('关掉 src 监听就不要求它', !miss4.includes('src/'), JSON.stringify(miss4));
 }
 
-console.log('[3] 文案生成');
+console.log('[4] 通知文案生成');
 {
   // 新装一个技能（目录里所有文件都是新增）
   const d1 = { added: ['skills/video-frames/index.js', 'skills/video-frames/plugin.json'], removed: [], changed: [] };
   const m1 = buildMessage(d1, {});
-  ok('认出"多了个技能"', m1.text.includes('多了个技能：video-frames'), m1.text);
+  ok('文案包含新增技能条目', m1.text.includes('多了个技能：video-frames'), m1.text);
   ok('带上询问', m1.text.includes('自动重新加载'), m1.text);
   ok('kinds 含技能', m1.kinds.includes('技能'));
 
   // 删掉一个插件
   const d2 = { added: [], removed: ['plugins/old/index.js'], changed: [] };
   const m2 = buildMessage(d2, {});
-  ok('认出"删了个插件"', m2.text.includes('删了个插件：old'), m2.text);
+  ok('文案包含删除插件条目', m2.text.includes('删了个插件：old'), m2.text);
 
   // 只改设置
   const d3 = { added: [], removed: [], changed: ['config.json'] };
   const m3 = buildMessage(d3, {});
-  ok('认出设置变更', m3.text.includes('改了我的设置'), m3.text);
+  ok('文案包含配置变更条目', m3.text.includes('改了我的设置'), m3.text);
   ok('设置类询问措辞', m3.text.includes('重启我才吃进去'), m3.text);
 
   // 改了一行插件代码 → 不是新增也不是删除
   const d4 = { added: [], removed: [], changed: ['plugins/share-card/index.js'] };
   const m4 = buildMessage(d4, {});
-  ok('认出"改动了插件"', m4.text.includes('改动了插件：share-card'), m4.text);
+  ok('文案包含插件修改条目', m4.text.includes('改动了插件：share-card'), m4.text);
 
   // 改了核心代码 → 必须明说"得重启"，且不能说"我自动重载了"
   const d5 = { added: [], removed: [], changed: ['src/orchestrator.js', 'src/tools.js'] };
   const m5 = buildMessage(d5, {});
-  ok('认出"动了我身体里的东西"', m5.text.includes('身体里的东西'), m5.text);
+  ok('文案包含核心代码变更条目', m5.text.includes('身体里的东西'), m5.text);
   ok('核心改动要求重启', m5.text.includes('重启我一次'), m5.text);
   ok('核心改动不说自动重载', !m5.text.includes('自动重新加载'), m5.text);
   ok('kinds 含核心', m5.kinds.includes('核心'));
 
-  // 只改技能 → 说"我自己会重载"，别让主人白等
+  // 仅修改技能：文案应说明自动重载，不要求重启
   const d6 = { added: [], removed: [], changed: ['skills/trendy-memes/skill.json'] };
   const m6 = buildMessage(d6, {});
   ok('技能改动用自动重载措辞', m6.text.includes('自动重新加载'), m6.text);
@@ -139,7 +139,7 @@ console.log('[3] 文案生成');
   ok('模板变量生效', m10.text.includes('动了 2 个文件（技能）'), m10.text);
 }
 
-console.log("[4] 忽略规则");
+console.log('[5] 扫描范围与忽略规则');
 {
   const st = internals.loadState();
   ok('状态可读（首次为空）', st.files === null || typeof st.files === 'object');
@@ -149,13 +149,13 @@ console.log("[4] 忽略规则");
     ok('扫描到文件', keys.length > 10, `只有 ${keys.length}`);
     ok('只含四处范围', keys.every((k) => k.startsWith('skills/') || k.startsWith('plugins/') || k.startsWith('src/') || k === 'config.json'), keys.find((k) => !(k.startsWith('skills/') || k.startsWith('plugins/') || k.startsWith('src/') || k === 'config.json')));
     ok('覆盖核心代码 src/', keys.some((k) => k.startsWith('src/')), '没扫到 src/');
-    // 只排除"运行数据"，别误伤 src/ 下的真核心文件（例如 src/sessions.js 是她身体的一部分）
+    // 仅排除运行数据目录，避免误伤 src/ 下的核心文件（例如 src/sessions.js 属于核心代码）
     ok('不含运行数据', !keys.some((k) => /^(logs|sessions|messages|video-cache|sticker-images)\//.test(k) || /jm-suomingor\/jm-/.test(k)), keys.filter((k) => /^(logs|sessions|messages|video-cache|sticker-images)\//.test(k) || /jm-suomingor\/jm-/.test(k)).slice(0, 3).join(','));
     ok('排除临时文件', !keys.some((k) => /\.(swp|swx|tmp|temp|bak|log|orig|rej)([-.]|$)/.test(k)), keys.filter((k) => /\.(swp|swx|tmp|temp|bak|log|orig|rej)([-.]|$)/.test(k)).slice(0, 3).join(','));
     ok('config.json 用哈希', !snap['config.json'] || snap['config.json'].startsWith('sha1:'));
   } else {
     console.log('  skip 扫描范围三条（当前不在 QQ Agent 宿主目录里，属预期）');
-    // 至少验证"空快照不会炸"
+    // 至少验证空快照不抛异常
     ok('无宿主时快照为空且不报错', keys.length === 0, JSON.stringify(keys.slice(0, 3)));
   }
 
@@ -166,7 +166,7 @@ console.log("[4] 忽略规则");
   const back = internals.loadState();
   ok('pending 能存能读', totalChanges(back.pending) === 2, JSON.stringify(back.pending));
   ok('pending 的 added 完整', back.pending.added.includes('skills/probe/index.js'));
-  // 还原成测试前的状态，别污染真实基线（真实环境可能正攥着待报改动）
+  // 恢复测试前的状态，避免污染真实基线（真实环境可能存有待发变更）
   internals.saveState(before);
   const restored = internals.loadState();
   ok('状态可还原', totalChanges(restored.pending) === totalChanges(before.pending), `${totalChanges(restored.pending)} vs ${totalChanges(before.pending)}`);
