@@ -6,6 +6,10 @@
 
 零依赖 · 零 token · 纯本地比对 · 不上报任何数据
 
+> ⚠️ **使用前请先读 [DISCLAIMER.md](DISCLAIMER.md)**
+> 简要版：本插件只读文件**属性**（不看内容）、只写自己的 `data/owner-watch/`、不执行命令、不联网、不删改任何已有文件。
+> 正常使用下不存在造成财产损失的路径，但请先在你的环境验证 —— 尤其是 `ownerId`（它决定提醒发给谁）。
+
 ---
 
 ## 这是在哪儿用的
@@ -194,7 +198,7 @@ node selftest.mjs     # 42 项
 
 ## License
 
-[MIT](LICENSE) © 2026 owner-watch contributors
+[MIT](LICENSE) © 2026 qingyan521314
 
 全文只有三段，核心就三条：
 
