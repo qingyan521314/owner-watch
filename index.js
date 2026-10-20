@@ -45,6 +45,29 @@
 //   tokens. The notification text is composed by the model (see
 //   composeNotice), can be disabled via useModel, and always keeps a
 //   template fallback.
+//
+// 内容详情（v1.3）与意图解释（v1.4）
+// Detail (v1.3) & intent (v1.4)
+//   除了文件名，本插件还会为被监听的文本文件留一份副本（data/owner-watch/contents/），
+//   变更时做行级 diff，把"具体加了/改了什么"一起交给模型，让它用自己的话带出来。
+//   只读文本、且不超过 MAX_SNAPSHOT_BYTES 的文件；二进制与超大文件只报类型和大小。
+//   留档仅存本机、仅覆盖被监听目录，可用 detailEnabled 关闭。详情随通知一并发送，
+//   冷却期间进入待发队列不丢失，发送成功或彻底失败后清空。
+//   v1.4 起，摘要进一步补上"作用"（清单的 description、代码文件的开头注释）与
+//   "结果"（清单的 tools 即新能力），提示词也要求模型讲清"干了什么 / 有什么用 /
+//   结果如何"三层，而不只是报文件名。
+//   Besides filenames, this plugin keeps a copy of every watched text file
+//   (data/owner-watch/contents/) and diffs it line by line on change, so the
+//   "what exactly changed" is handed to the model to phrase in its own voice.
+//   Only text files under MAX_SNAPSHOT_BYTES are read; binary/oversized files
+//   report type and size only. Snapshots stay on this machine, cover only the
+//   watched paths, and can be disabled via detailEnabled. Detail rides along
+//   with the notice, survives cooldown in the queue, and is cleared after a
+//   successful (or definitively failed) send.
+//   From v1.4 the summary also carries "effect" (a manifest's description, a
+//   code file's header comment) and "result" (a manifest's tools = new
+//   capabilities), and the prompt asks the model to convey all three layers —
+//   what changed, what it is for, and what it leads to — instead of just names.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -62,13 +85,28 @@ const MAX_TEXT = 900;             // 通知硬上限（协议长度限制）/ ha
 const IDLE_WRITE_MS = 60000;      // 无变更时状态文件的最大写入间隔 / max write gap when idle
 const MAX_MODEL_CHARS = 160;      // 生成文本超过此长度即丢弃 / composed text longer than this is discarded
 const MAX_MODEL_CHARS_HARD = 320; // 发送前的绝对上限 / absolute cap before sending
-// 基线结构版本。监听范围变更时递增，用于触发基线静默重建。
+// 内容留档与详情摘要（v1.3）：把"只报文件名"升级为"能说明具体改了什么"。
+// 为控制开销与体积，只对文本文件、且不超过下列大小时读取并留档内容，
+// 二进制与超大文件仅报告"文件类型 + 大小变化"。
+// Content snapshot & detail knobs (v1.3): upgrade from filename-only to a
+// summary of the actual change. Only text files under the size cap are read
+// and snapshotted; binary and oversized files only report type and size change.
+const MAX_SNAPSHOT_BYTES = 256 * 1024;  // 留档单文件大小上限 / max bytes to snapshot
+const MAX_DETAIL_CHARS = 1500;          // 单次通知的详情文本总长上限 / total detail cap
+const MAX_SAMPLE_LINES = 3;             // 单文件摘录的示例行数 / sample lines per file
+const MAX_SAMPLE_CHARS = 120;           // 单行摘录长度 / max chars per sampled line
+const TEXT_EXT_RE = /\.(js|mjs|cjs|json|md|markdown|txt|text|ts|tsx|jsx|css|html|htm|yml|yaml|py|sh|bat|xml|svg|vue|toml|ini|conf|env|gitignore|npmrc)$/i;
+// 基线结构版本。监听范围或状态结构变更时递增，用于触发基线静默重建。
 // 若不递增，从"仅监听 skills/plugins"升级到"同时监听 src/"时，
 // 首次比对会把 src/ 下全部文件判为新增并批量上报。
-// Baseline schema version. Increment whenever the watched set changes so that
-// stale baselines are rebuilt silently. Without it, upgrading from
-// "skills/plugins only" to "also src/" reports every file under src/ as added.
-const STATE_SCHEMA = 2;
+// Baseline schema version. Increment whenever the watched set or the state
+// structure changes so that stale baselines are rebuilt silently. Without it,
+// upgrading from "skills/plugins only" to "also src/" reports every file under
+// src/ as added.
+// v1.3: 2 -> 3，新增 details 字段与 contents 快照目录，重建基线并同步快照。
+// v1.3: 2 -> 3, added the details field and the contents snapshot directory;
+// the baseline is rebuilt so snapshots are (re)synchronized.
+const STATE_SCHEMA = 3;
 
 let api = null;
 let timer = null;
@@ -86,6 +124,11 @@ function dataDir() {
 const STATE_DIR = () => path.join(dataDir(), 'owner-watch');
 const STATE_FILE = () => path.join(STATE_DIR(), 'state.json');
 const LOG_FILE = () => path.join(STATE_DIR(), 'log.txt');
+// 内容留档目录：为每个被监听的文本文件保存一份副本，供变更时做行级 diff。
+// 文件名用 encodeURIComponent 编码相对路径，避免 / 与特殊字符带来的目录歧义。
+// Snapshot directory: keeps a copy of every watched text file so a change can be
+// diffed line by line. Relative paths are percent-encoded into flat filenames.
+const CONTENTS_DIR = () => path.join(STATE_DIR(), 'contents');
 
 /**
  * 追加一行运行流水，仅在检测到变更或产生决策时调用。
@@ -181,11 +224,16 @@ function loadState() {
           removed: Array.isArray(p.removed) ? p.removed : [],
           changed: Array.isArray(p.changed) ? p.changed : []
         },
+        // details 保存"已检测到但尚未随通知发送"的内容摘要（key 为相对路径）。
+        // 它与 pending 同生命周期：发送成功后一并清空，避免冷却期内丢失具体改动。
+        // details holds per-file change summaries not yet delivered (key = relative
+        // path). It shares pending's lifecycle and is cleared after a successful send.
+        details: j.details && typeof j.details === 'object' ? j.details : {},
         failCount: Number(j.failCount) || 0
       };
     }
   } catch { /* 首次运行或文件损坏，均按空状态处理 / first run or unreadable file: treat as empty state */ }
-  return { version: 1, schema: 0, at: 0, files: null, lastNotifyAt: 0, pending: { added: [], removed: [], changed: [] }, failCount: 0 };
+  return { version: 1, schema: 0, at: 0, files: null, lastNotifyAt: 0, pending: { added: [], removed: [], changed: [] }, details: {}, failCount: 0 };
 }
 
 let lastWriteAt = 0;
@@ -279,6 +327,260 @@ function snapshot() {
     if (sig) out['config.json'] = sig;
   }
   return out;
+}
+
+/* ───────────────────── 内容留档与详情 / content snapshot & detail ───────────────────── */
+
+/** 相对路径 → 绝对路径。config.json 位于数据目录，其余在 resources/app 下。
+ *  Resolve a relative watch path to an absolute path. config.json lives in the
+ *  data directory; everything else lives under resources/app. */
+function absFor(rel) {
+  if (rel === 'config.json') return path.join(dataDir(), 'config.json');
+  return path.join(APP_ROOT, rel);
+}
+
+/** 内容留档文件路径：用 percent-encoding 平铺相对路径，避免目录歧义。
+ *  Snapshot file path: flatten the relative path with percent-encoding. */
+function snapshotPathFor(rel) {
+  return path.join(CONTENTS_DIR(), encodeURIComponent(rel));
+}
+
+/** 读取留档内容；不存在或损坏返回 null。
+ *  Read a snapshot; null when missing or unreadable. */
+function readSnapshot(rel) {
+  try { return fs.readFileSync(snapshotPathFor(rel), 'utf8'); } catch { return null; }
+}
+
+/** 写入留档。目录按需创建；失败只降低后续 diff 精度，不影响主流程。
+ *  Write a snapshot. Create the directory as needed; failure only degrades later
+ *  diff precision, never the main flow. */
+function writeSnapshot(rel, text) {
+  try {
+    fs.mkdirSync(CONTENTS_DIR(), { recursive: true });
+    fs.writeFileSync(snapshotPathFor(rel), String(text ?? ''), 'utf8');
+  } catch { /* 留档失败可容忍 / snapshot write failure is tolerable */ }
+}
+
+/** 删除留档（被监听文件消失后清理）。
+ *  Remove a snapshot once the watched file is gone. */
+function removeSnapshot(rel) {
+  try { fs.unlinkSync(snapshotPathFor(rel)); } catch { /* 不存在则忽略 / ignore if absent */ }
+}
+
+/** 全量重建留档：清空目录后为基线内每个文本文件写一份副本。
+ *  仅在建立/重建基线时调用，保证快照目录与当前监听范围严格一致。
+ *  Rebuild all snapshots: clear the directory, then snapshot every text file in
+ *  the baseline. Called only when the baseline is (re)built. */
+function syncSnapshots(files) {
+  try { fs.rmSync(CONTENTS_DIR(), { recursive: true, force: true }); } catch { /* 忽略 / ignore */ }
+  for (const rel of Object.keys(files || {})) {
+    let buf;
+    try { buf = fs.readFileSync(absFor(rel)); } catch { continue; }
+    if (buf.length > MAX_SNAPSHOT_BYTES || !isLikelyText(buf)) continue;
+    writeSnapshot(rel, buf.toString('utf8'));
+  }
+}
+
+/** 读取某文件当前内容与元信息。文件缺失或不可读时 meta 为 null。
+ *  Read the current bytes of a watched file plus metadata. meta is null when the
+ *  file is gone or unreadable.
+ *  @returns {{text: string|null, meta: {bytes:number,binary:boolean,big:boolean,ext:string}|null}} */
+function readCurrent(rel) {
+  let buf;
+  try { buf = fs.readFileSync(absFor(rel)); } catch { return { text: null, meta: null }; }
+  const meta = {
+    bytes: buf.length,
+    ext: path.extname(rel).slice(1).toLowerCase(),
+    binary: !isLikelyText(buf),
+    big: buf.length > MAX_SNAPSHOT_BYTES
+  };
+  if (meta.binary || meta.big) return { text: null, meta };
+  return { text: buf.toString('utf8'), meta };
+}
+
+/** 粗判是否文本：采样前 8KB，含 NUL 字节即视为二进制。
+ *  Heuristic text check: a NUL byte within the first 8 KB marks a binary file. */
+function isLikelyText(buf) {
+  if (!buf || !buf.length) return true;
+  const n = Math.min(buf.length, 8000);
+  for (let i = 0; i < n; i++) if (buf[i] === 0) return false;
+  return true;
+}
+
+/**
+ * 行级近似 diff：去掉公共前缀与公共后缀，中间即被替换的块。
+ * 相比完整 LCS 这是 O(n) 的近似：对"改几行/加几行"的常见编辑足够精确，
+ * 整段重写则退化为 +A/-B 加若干示例行。这里只要"摘要给模型看"，不需要可打补丁。
+ * Approximate line diff: strip the common prefix and suffix, the middle is the
+ * replaced block. Unlike a full LCS this is O(n); it is exact for the common
+ * "edit/add a few lines" case and degrades to +A/-B plus samples for a full
+ * rewrite. A summary is all that is needed, not a patch.
+ * @returns {{added: number, removed: number, samples: string[]}}
+ */
+export function diffLines(oldText, newText) {
+  // 空串 split 会得到 [''] 而非空数组，导致凭空多出"删了一行"；
+  // 这里把空文本显式映射为空行数组。
+  // An empty string splits to [''] instead of [], which would fabricate one
+  // removed line; map empty text to an empty line array explicitly.
+  const a = oldText ? String(oldText).split(/\r?\n/) : [];
+  const b = newText ? String(newText).split(/\r?\n/) : [];
+  let start = 0;
+  while (start < a.length && start < b.length && a[start] === b[start]) start++;
+  let endA = a.length;
+  let endB = b.length;
+  while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) { endA--; endB--; }
+  const samples = [];
+  for (let i = start; i < endB && samples.length < MAX_SAMPLE_LINES; i++) {
+    const line = b[i].trim();
+    if (!line) continue;
+    samples.push(line.length > MAX_SAMPLE_CHARS ? `${line.slice(0, MAX_SAMPLE_CHARS)}…` : line);
+  }
+  return { added: endB - start, removed: endA - start, samples };
+}
+
+/** 提取 skill.json / plugin.json / package.json 的元信息，供"新增了谁"的摘要。
+ *  Extract name/description/version/tools from a skill/plugin/package manifest.
+ *  tools 是"结果"的关键：它告诉模型这次改动让机器人多出了哪些能力。
+ *  tools carries the "result": it tells the model which new capabilities the
+ *  change grants the bot. */
+function jsonMeta(text) {
+  if (!text) return null;
+  try {
+    const j = JSON.parse(text);
+    if (!j || typeof j !== 'object') return null;
+    const tools = Array.isArray(j.tools)
+      ? j.tools.map((t) => String(t?.name || t?.id || '').trim()).filter(Boolean)
+      : [];
+    return {
+      name: String(j.name || j.id || '').trim(),
+      desc: String(j.description || j.summary || '').trim(),
+      ver: String(j.version || '').trim(),
+      tools
+    };
+  } catch { return null; }
+}
+
+/** 提取文本文件开头连续的注释块，作为"这个文件是干嘛的"的上下文。
+ *  仅取前 160 字，避免把整段版权头都塞给模型。
+ *  Extract the leading contiguous comment block as a hint of what the file is
+ *  for. Capped at 160 chars so a long license header is not fed verbatim. */
+function headComment(text) {
+  const t = String(text ?? '');
+  if (!t) return '';
+  const lines = t.replace(/^#![^\n]*\n/, '').split(/\r?\n/);
+  const out = [];
+  let inBlock = false;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (inBlock) {
+      out.push(line.replace(/^\*\s?/, '').trim());
+      if (line.includes('*/')) inBlock = false;
+      continue;
+    }
+    if (/^\/\*/.test(line)) {
+      inBlock = !line.includes('*/');
+      out.push(line.replace(/^\/\*+\s?/, '').replace(/\s?\*\/\s*$/, '').trim());
+      continue;
+    }
+    if (/^\/\/+/.test(line)) {
+      out.push(line.replace(/^\/\/+\s?/, '').trim());
+      continue;
+    }
+    if (line === '') continue;   // 注释块内的空行忽略，继续往后看 / skip blanks inside the block
+    break;                        // 第一行真正的代码结束注释块 / first real code line ends the block
+  }
+  const joined = out.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+  if (!joined) return '';
+  return joined.length > 160 ? `${joined.slice(0, 160)}…` : joined;
+}
+
+/** 生成单文件摘要：文本文件给出行级改动 + 示例 + 开头注释（作用）；
+ *  清单文件给出名称与描述（作用）与 tools（结果）；
+ *  二进制/超大文件只报大小。纯函数（meta 由调用方提供）。
+ *  Build a per-file summary: line-level change + samples + header comment
+ *  (effect) for text; name/desc (effect) and tools (result) for manifests;
+ *  size only for binary or oversized files. Pure function.
+ *  @param {string} rel      相对路径 / relative path
+ *  @param {string|null} oldText 变更前文本 / previous text
+ *  @param {string|null} newText 变更后文本 / current text
+ *  @param {'added'|'changed'|'removed'} kind
+ *  @param {{bytes:number,binary:boolean,big:boolean,ext:string}|null} meta
+ */
+export function summarizeFile(rel, oldText, newText, kind, meta) {
+  const base = path.basename(rel);
+  if (meta?.binary) return `二进制文件（${fmtBytes(meta.bytes)}），未读内容`;
+  if (meta?.big) return `大文件（${fmtBytes(meta.bytes)}），未逐行比对`;
+
+  // 清单文件优先给"名称 + 描述 + 能力"：描述是"作用"，tools 是"结果"，
+  // 合起来让模型能说清"加了谁、干嘛用、带来什么"。
+  // Manifests first: name + description + tools. The description carries the
+  // "effect", tools carry the "result", so together the model can say what was
+  // added, what it is for and what it grants.
+  if (/^(skill|plugin|package)\.json$/i.test(base)) {
+    const m = jsonMeta(kind === 'removed' ? oldText : newText);
+    if (m && (m.name || m.desc)) {
+      const parts = [];
+      if (m.name) parts.push(`「${m.name}」`);
+      if (m.ver) parts.push(`v${m.ver}`);
+      if (m.desc) parts.push(m.desc);
+      if (m.tools.length) parts.push(`带来 ${m.tools.length} 个能力：${m.tools.slice(0, 6).join('、')}`);
+      return parts.filter(Boolean).join('，');
+    }
+  }
+
+  const d = diffLines(oldText, newText);
+  let stat;
+  if (kind === 'removed') stat = `删了 ${d.removed} 行`;
+  else if (kind === 'added') stat = `新增 ${d.added} 行`;
+  else stat = `+${d.added} -${d.removed} 行`;
+  const parts = [stat];
+  // 示例行只在"修改"时有意义：新增/删除时整份文件都是新的/整份消失，
+  // 抽到的"示例"不过是文件开头几行，与下面"作用"里的开头注释重复。
+  // Samples are meaningful only for a modification: for add/remove the whole
+  // file is new/gone, so the "samples" would just be the file's first lines and
+  // duplicate the header comment used as "effect" below.
+  if (kind === 'changed' && d.samples.length) parts.push(`如：${d.samples.join('；')}`);
+  // 文件头部注释通常说明这个文件的用途，是"作用"的来源。
+  // The header comment usually states what the file is for — the "effect" source.
+  const hc = headComment(kind === 'removed' ? oldText : newText);
+  if (hc) parts.push(`作用：${hc}`);
+  return parts.join('；');
+}
+
+function fmtBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
+ * 汇总整批变更的详情文本，供模型在通知里自然引用。
+ * 分「新增 / 修改 / 删除」三节，每条一行；超过 MAX_DETAIL_CHARS 截断。
+ * Assemble the detail text for a whole batch, grouped by added/modified/removed,
+ * one line per file, truncated to MAX_DETAIL_CHARS.
+ * @param {object} diff    mergeDiff 的结果 / result of mergeDiff
+ * @param {object} details 相对路径 → 摘要 / relative path → summary
+ * @param {object} cfg     插件设置 / plugin settings
+ * @returns {string}
+ */
+export function buildDetailText(diff, details = {}, cfg = {}) {
+  if (cfg.detailEnabled === false) return '';
+  const d = details || {};
+  const sections = [];
+  const push = (head, files, mark) => {
+    const rows = files.map((f) => `${mark}${f}${d[f] ? ` → ${d[f]}` : ''}`);
+    if (rows.length) sections.push(`${head}\n${rows.join('\n')}`);
+  };
+  push('【新增】', diff.added || [], '+ ');
+  push('【修改】', diff.changed || [], '~ ');
+  push('【删除】', diff.removed || [], '- ');
+  if (!sections.length) return '';
+  let text = sections.join('\n');
+  // 长度上限取配置项 maxDetailChars（默认 MAX_DETAIL_CHARS），避免写死。
+  // The cap follows the maxDetailChars setting (default MAX_DETAIL_CHARS).
+  const cap = num(cfg.maxDetailChars, MAX_DETAIL_CHARS, 100, 8000);
+  if (text.length > cap) text = `${text.slice(0, cap - 20)}…（详情太长，截断）`;
+  return text;
 }
 
 /* ─────────────────────────── 差异 / diffs ─────────────────────────── */
@@ -610,24 +912,45 @@ function buildChangeSummary(diff) {
  * 生成通知文本。
  * Compose the notification text.
  *
- * 策略：让模型按角色设定现场说一句，因为固定开场白会让每条通知都像系统告警。
- * 模板保留为兜底，确保模型异常时通知本身不会丢失。
- * Strategy: let the model speak in its own voice using the configured persona,
- * because a fixed opening line makes every notification read like a system
- * alert. The template is kept as a fallback so a model failure never suppresses
- * the notification itself.
+ * 策略：让模型按"发给谁那个会话实际生效的人设"现场说一句，并把本轮具体改动
+ * （内容摘要，含作用与结果线索）一并交给模型，让它能在话里自然带出"干了什么、
+ * 有什么用、结果如何"。
+ * 固定开场白会让每条通知都像系统告警；模板保留为兜底，并在模型不可用时
+ * 附加结构化详情，确保具体改动内容不因模型异常而丢失。
+ * Strategy: let the model speak in the persona effective for the recipient's
+ * chat, and hand it the concrete change detail so it can naturally mention what
+ * was added or edited. A fixed opening line makes every notice read like a
+ * system alert. The template stays as a fallback and carries the structured
+ * detail when the model is unavailable, so the specifics are never lost.
  *
- * @returns {{text, kinds, count, source}} source 为 'model' | 'template' | 'none'
+ * @param {object} diff   mergeDiff 的结果 / result of mergeDiff
+ * @param {object} cfg    插件设置 / plugin settings
+ * @param {string} ownerId 通知对象 QQ 号（用于取该会话人设）/ recipient QQ id
+ * @param {object} details 相对路径 → 内容摘要 / relative path → summary
+ * @returns {{text, kinds, count, source, detail}} source 为 'model' | 'template' | 'none'
  */
-export async function composeNotice(diff, cfg = {}) {
+export async function composeNotice(diff, cfg = {}, ownerId = '', details = {}) {
   const tpl = buildMessage(diff, cfg);
-  if (!tpl.count) return { ...tpl, source: 'none' };
-  if (cfg.useModel === false) return { ...tpl, source: 'template' };
+  if (!tpl.count) return { ...tpl, source: 'none', detail: '' };
+  const detail = buildDetailText(diff, details, cfg);
+  if (cfg.useModel === false) {
+    const text = withDetail(tpl.text, detail);
+    return { text, kinds: tpl.kinds, count: tpl.count, source: 'template', detail };
+  }
 
   const mod = await loadConfigMod();
   const hostCfg = mod?.getConfig?.() || {};
-  const personaText = String(hostCfg?.persona?.roleText || '').trim();
-  const botName = String(hostCfg?.persona?.botName || '').trim();
+
+  // 人设取"发给谁"那个会话实际生效的版本：开源后每个 bot 的人设不同，
+  // 必须跟随宿主当前人设来维持语气，而不是写死某一种。
+  // Use the persona effective for the recipient's chat: since personas differ
+  // per bot once open-sourced, the voice must follow the host's current persona.
+  let persona = hostCfg?.persona || {};
+  if (ownerId && typeof mod?.personaForChat === 'function') {
+    try { persona = mod.personaForChat(`private:${ownerId}`) || persona; } catch { /* fallback below */ }
+  }
+  const personaText = String(persona?.roleText || '').trim();
+  const botName = String(persona?.botName || '').trim();
 
   const summary = buildChangeSummary(diff);
   const needsRestart = tpl.kinds.includes('核心');
@@ -642,18 +965,23 @@ export async function composeNotice(diff, cfg = {}) {
     + '直接用你自己的身份和语气说话，不要扮演助手，不要解释来龙去脉。'
   ].filter(Boolean).join('\n\n');
 
+  const detailBlock = detail
+    ? `你确实看到了具体改动（已精简，可能含它是什么、能干什么、带来了哪些能力）：\n${detail}\n`
+    : '你这次只能看到哪些文件被动过，看不到具体内容，别编造细节。';
+
   const user = [
     `你注意到的改动是：`,
     summary,
     '',
+    detailBlock,
+    '',
     hint,
     '',
     '请给主人发一句话。要求：',
-    '· 一到两句，像平时说话，短。',
-    '· 不要列清单，不要用"检测到""变更""通知""系统"这类词。',
-    '· 不要每句都用同样的称呼起头，也不用每次开口都叫人。',
+    '· 一到三句，像平时说话，短。',
+    '· 尽量让主人知道三件事：具体改了什么（干什么）、这个改动是干嘛用的（作用）、改完以后会怎样（结果，比如你多了个能力、以后能帮他做什么）。用自己的话自然带出一两点即可，不必三点都齐全，也不要列清单、不要逐条复述。',
+    '· 不要用"检测到""变更""通知""系统"这类词，不要每句都用同样的称呼起头。',
     '· 可以带一点情绪，但不要长篇、不要说教。',
-    '· 你只知道文件名，不知道具体改了什么，不要编造改动内容。',
     '· 如果你觉得没什么好说的，就随便说一句你现在的想法。',
     '只输出要发的那句话本身，不要加引号、不要加说明。'
   ].join('\n');
@@ -663,10 +991,19 @@ export async function composeNotice(diff, cfg = {}) {
     num(cfg.modelTimeoutMs, 12000, 3000, 60000)
   );
   const text = sanitizeNotice(raw, num(cfg.modelMaxChars, MAX_MODEL_CHARS, 40, MAX_MODEL_CHARS_HARD));
-  if (!text) return { ...tpl, source: 'template' };
+  if (!text) return { text: withDetail(tpl.text, detail), kinds: tpl.kinds, count: tpl.count, source: 'template', detail };
 
   dbg(`model composed ${text.length} chars (template fallback ready)`);
-  return { text, kinds: tpl.kinds, count: tpl.count, source: 'model' };
+  return { text, kinds: tpl.kinds, count: tpl.count, source: 'model', detail };
+}
+
+/** 把结构化详情附加到通知文本末尾（模板兜底用），并按协议长度截断。
+ *  Append the structured detail to a notice (template path), capped to the
+ *  protocol length limit. */
+function withDetail(base, detail) {
+  if (!detail) return base;
+  const joined = `${base}\n\n${detail}`;
+  return joined.length > MAX_TEXT ? `${joined.slice(0, MAX_TEXT - 12)}…（太长，收着说了）` : joined;
 }
 
 /* ─────────────────────────── 发送 / sending ─────────────────────────── */
@@ -698,17 +1035,22 @@ async function tick() {
     const snap = snapshot();
 
     // 首次安装或基线结构过期：仅建立基线，不发送通知。
-    // 两个判据同时使用：schema 覆盖"新增了监听目录"，missingPrefixes 覆盖
-    // "旧基线缺少新区域但 schema 已是新值"（该情况曾导致 50 条误报进入待发队列）。
+    // 两个判据同时使用：schema 覆盖"新增监听目录 / 状态结构变化"，missingPrefixes
+    // 覆盖"旧基线缺少新区域但 schema 已是新值"（该情况曾导致 50 条误报进入待发队列）。
     // First run, or an outdated baseline: build the baseline and stay silent.
-    // Both tests are required: schema covers "a watched root was added", while
-    // missingPrefixes covers "old baseline lacks a newly watched root although
-    // schema already reads as current" (that case once queued 50 false entries).
+    // Both tests are required: schema covers "a watched root was added or the
+    // state structure changed", while missingPrefixes covers "old baseline lacks
+    // a newly watched root although schema already reads as current" (that case
+    // once queued 50 false entries).
     const missing = st.files ? missingPrefixes(st.files, cfg, snap) : ['(no baseline)'];
     if (!st.files || st.schema !== STATE_SCHEMA || missing.length) {
+      // 建立/重建基线时同步内容快照：后续变更才能做行级 diff。
+      // Sync content snapshots when the baseline is (re)built; only then can a
+      // later change be diffed line by line.
+      syncSnapshots(snap);
       saveState({
         version: 1, schema: STATE_SCHEMA, at: now, files: snap,
-        lastNotifyAt: st.lastNotifyAt || 0, pending: {}, failCount: 0
+        lastNotifyAt: st.lastNotifyAt || 0, pending: {}, details: {}, failCount: 0
       });
       dbg(st.files
         ? `baseline rebuilt (schema ${st.schema} -> ${STATE_SCHEMA}, missing ${missing.join(',')}): ${Object.keys(snap).length} files`
@@ -718,22 +1060,67 @@ async function tick() {
     }
 
     const diff = diffSnapshots(st.files, snap);
-    // 合并待发队列与本轮差异，避免快照推进后待发变更失去发送时机
-    // Merge the queue with the current diff; otherwise advancing the snapshot
+
+    // 内容精筛 + 详情生成：对每个变更文件读旧留档与新内容，产出摘要并同步快照。
+    // 仅 mtime/size 变化而内容未变的文件在此被剔除（如编辑器 touch、宿主重写默认值）。
+    // Refine the diff and build details: for each changed file, read the old
+    // snapshot and the new content, produce a summary and refresh the snapshot.
+    // Files whose mtime/size moved but whose content is identical (editor touch,
+    // host rewriting defaults) are dropped here.
+    const details = { ...(st.details || {}) };
+    const pruned = { added: [], removed: [], changed: [] };
+    for (const f of diff.changed) {
+      const oldText = readSnapshot(f);
+      const cur = readCurrent(f);
+      if (!cur.meta) continue;                                                       // 文件瞬间消失，交给下一轮 / vanished: next pass
+      if (oldText !== null && cur.text !== null && oldText === cur.text) continue;   // 内容未变 / unchanged
+      if (cur.meta.binary || cur.meta.big) {
+        details[f] = summarizeFile(f, null, null, 'changed', cur.meta);
+      } else {
+        details[f] = summarizeFile(f, oldText, cur.text, 'changed', cur.meta);
+        writeSnapshot(f, cur.text);
+      }
+      pruned.changed.push(f);
+    }
+    for (const f of diff.added) {
+      const cur = readCurrent(f);
+      if (!cur.meta) continue;
+      if (cur.meta.binary || cur.meta.big) {
+        details[f] = summarizeFile(f, null, null, 'added', cur.meta);
+      } else {
+        details[f] = summarizeFile(f, null, cur.text, 'added', cur.meta);
+        writeSnapshot(f, cur.text);
+      }
+      pruned.added.push(f);
+    }
+    for (const f of diff.removed) {
+      const oldText = readSnapshot(f);
+      if (oldText !== null) {
+        const meta = { bytes: Buffer.byteLength(oldText), binary: false, big: false, ext: path.extname(f).slice(1) };
+        details[f] = summarizeFile(f, oldText, null, 'removed', meta);
+      } else {
+        details[f] = '已删除（未留档，看不到内容）';
+      }
+      removeSnapshot(f);
+      pruned.removed.push(f);
+    }
+
+    // 合并待发队列与精筛后的本轮差异，避免快照推进后待发变更失去发送时机
+    // Merge the queue with the refined diff; otherwise advancing the snapshot
     // would leave queued changes without a chance to be sent.
-    const merged = mergeDiff(st.pending, diff);
+    const merged = mergeDiff(st.pending, pruned);
     const n = totalChanges(merged);
     if (!n) {
       pendingSince = 0;
-      // 无变更时不必每轮写盘，限制为每分钟一次
-      // Nothing changed: no need to rewrite state every pass.
+      // 无变更时不必每轮写盘，限制为每分钟一次；此时也无详情可保留。
+      // Nothing changed: no need to rewrite state every pass; no detail to keep.
       if (now - lastWriteAt < IDLE_WRITE_MS) return;
-      saveState({ ...st, at: now, files: snap, pending: {} });
+      saveState({ ...st, at: now, files: snap, pending: {}, details: {} });
       return;
     }
-    if (totalChanges(diff)) {
-      dbg(`detected ${totalChanges(diff)} new change(s), ${n} queued: +${diff.added.length} -${diff.removed.length} ~${diff.changed.length}; `
-        + `sample ${[...diff.added, ...diff.removed, ...diff.changed].slice(0, 3).join(', ')}`);
+    if (totalChanges(pruned)) {
+      dbg(`detected ${totalChanges(pruned)} new change(s), ${n} queued: +${pruned.added.length} -${pruned.removed.length} ~${pruned.changed.length}; `
+        + `sample ${[...pruned.added, ...pruned.removed, ...pruned.changed].slice(0, 3).join(', ')}`);
     }
 
     // 去抖：每当观察到新变更就重新计时，只有停止变更 debounceSec 秒后才发送。
@@ -742,12 +1129,12 @@ async function tick() {
     // Debounce: reset the timer on every newly observed change, so a notice is
     // sent only after changes stop for debounceSec seconds. Tracking only the
     // first change would fire early while edits are still ongoing.
-    if (totalChanges(diff)) pendingSince = now;
+    if (totalChanges(pruned)) pendingSince = now;
     const waitMs = num(cfg.debounceSec, 10, 0, 600) * 1000;
     if (now - pendingSince < waitMs) {
-      // 尚未静默：推进快照，变更暂存至待发队列
-      // Not settled yet: advance the snapshot, keep changes queued.
-      saveState({ ...st, at: now, files: snap, pending: merged });
+      // 尚未静默：推进快照，变更与详情暂存至待发队列
+      // Not settled yet: advance the snapshot, keep changes and details queued.
+      saveState({ ...st, at: now, files: snap, pending: merged, details });
       return;
     }
 
@@ -755,14 +1142,14 @@ async function tick() {
     // Cooldown: keep queueing, do not drop.
     const cooldownMs = num(cfg.cooldownMin, 15, 0, 1440) * 60000;
     if (st.lastNotifyAt && now - st.lastNotifyAt < cooldownMs) {
-      saveState({ ...st, at: now, files: snap, pending: merged });
+      saveState({ ...st, at: now, files: snap, pending: merged, details });
       pendingSince = 0;
       dbg(`cooldown active (${Math.round((now - st.lastNotifyAt) / 60000)} min since last), queueing ${n}`);
       return;
     }
 
-    const { text, kinds, count, source } = await composeNotice(merged, cfg);
     const owner = await resolveOwnerIdAsync().catch(() => '');
+    const { text, kinds, count, source } = await composeNotice(merged, cfg, owner, details);
     let delivered = false;
 
     if (!owner) {
@@ -786,21 +1173,21 @@ async function tick() {
 
     pendingSince = 0;
     if (delivered || !owner) {
-      // 已送达，或未配置通知对象：清空待发队列并推进冷却时间
-      // Delivered, or nowhere to send: clear the queue and start cooldown.
-      saveState({ version: 1, at: now, files: snap, lastNotifyAt: now, pending: {}, failCount: 0 });
+      // 已送达，或未配置通知对象：清空待发队列与详情并推进冷却时间
+      // Delivered, or nowhere to send: clear the queue and details, start cooldown.
+      saveState({ version: 1, at: now, files: snap, lastNotifyAt: now, pending: {}, details: {}, failCount: 0 });
     } else {
-      // 发送失败：保留待发队列，下一轮重试，避免网络波动导致通知丢失。
+      // 发送失败：保留待发队列与详情，下一轮重试，避免网络波动导致通知丢失。
       // 同时设置重试上限（3 次）：协议端持续不可用时每 15 秒重试一次没有意义。
-      // Send failed: keep the queue and retry on the next pass so a transient
-      // network error does not swallow the notification. Capped at 3 attempts,
-      // because retrying every 15s against a dead endpoint is pointless.
+      // Send failed: keep the queue and details and retry on the next pass so a
+      // transient network error does not swallow the notification. Capped at 3
+      // attempts, because retrying every 15s against a dead endpoint is pointless.
       const fails = (st.failCount || 0) + 1;
       if (fails >= 3) {
         dbg(`send failed ${fails} times, dropping ${count} queued change(s)`);
-        saveState({ version: 1, at: now, files: snap, lastNotifyAt: st.lastNotifyAt || 0, pending: {}, failCount: 0 });
+        saveState({ version: 1, at: now, files: snap, lastNotifyAt: st.lastNotifyAt || 0, pending: {}, details: {}, failCount: 0 });
       } else {
-        saveState({ version: 1, at: now, files: snap, lastNotifyAt: st.lastNotifyAt || 0, pending: merged, failCount: fails });
+        saveState({ version: 1, at: now, files: snap, lastNotifyAt: st.lastNotifyAt || 0, pending: merged, details, failCount: fails });
       }
     }
   } catch (error) {
@@ -864,6 +1251,7 @@ export const providers = {
         config: cfg.watchConfig !== false
       },
       modelComposition: cfg.useModel !== false,
+      detailEnabled: cfg.detailEnabled !== false,
       files: st.files ? Object.keys(st.files).length : 0,
       baselineAt: st.at || 0,
       lastNotifyAt: st.lastNotifyAt || 0,
@@ -877,4 +1265,9 @@ export const providers = {
 
 /** 测试钩子：不启动定时器，手动执行一轮。
  *  Test hook: run one pass without starting the timer. */
-export const internals = { tick, snapshot, loadState, saveState, STATE_FILE, LOG_FILE, diffSnapshots, mergeDiff, buildMessage, composeNotice, sanitizeNotice };
+export const internals = {
+  tick, snapshot, loadState, saveState, STATE_FILE, LOG_FILE, CONTENTS_DIR,
+  diffSnapshots, mergeDiff, missingPrefixes, buildMessage, composeNotice, sanitizeNotice,
+  diffLines, summarizeFile, buildDetailText, readSnapshot, writeSnapshot, readCurrent, syncSnapshots,
+  headComment, jsonMeta
+};

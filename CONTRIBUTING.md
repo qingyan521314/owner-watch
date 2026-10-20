@@ -3,7 +3,7 @@
 ## 提交前检查
 
 ```bash
-node selftest.mjs        # 全部通过（宿主目录内 54 项，独立目录 49 项）
+node selftest.mjs        # 全部通过（宿主目录内 80 项，独立目录 74 项）
 node --check index.js    # 语法检查
 ```
 
@@ -15,11 +15,13 @@ node --check index.js    # 语法检查
 
 1. **无第三方依赖**：不得新增 `package.json` 依赖，仅使用 Node.js 标准库。
 2. **不执行外部命令**：禁止使用 `child_process`、`spawn`、`exec`、`eval`、`Function`。
-3. **仅读取文件属性**：扫描 `skills/`、`plugins/`、`src/` 时只读取 `stat` 信息。
-   唯一例外是 `data/config.json`（用于计算哈希），不得扩展至其他文件。
+3. **内容读取严格受限**：扫描 `skills/`、`plugins/`、`src/` 时默认只读取 `stat` 信息；
+   仅当检测到变更、且 `detailEnabled` 开启时，才读取发生变化的文本文件（≤ 256 KB、
+   不含二进制特征）做行级 diff，并把副本留在 `data/owner-watch/contents/`。
+   二进制与超大文件不得读取内容，被监听范围之外的任何文件不得读取。
 4. **仅写入自身目录**：所有写操作必须位于 `data/owner-watch/` 下。
 5. **网络访问受限**：除宿主本机 OneBot 通道与宿主提供的模型接口（`api.fetch`）外，禁止任何网络访问，禁止遥测。
-6. **模型调用仅用于生成通知文本**：必须由 `useModel` 开关控制、必须保留模板兜底、必须经 `sanitizeNotice` 校验；不得把模型用于其他用途，不得向模型发送文件内容或聊天内容。
+6. **模型调用仅用于生成通知文本**：必须由 `useModel` 开关控制、必须保留模板兜底、必须经 `sanitizeNotice` 校验；不得把模型用于其他用途。发送给模型的仅限变更摘要（行级 diff 的增删行数、关键行、清单文件的名称/描述/能力、代码文件的开头注释）、文件名与角色设定，不得发送完整文件内容或聊天内容。
 7. **不修改宿主核心代码**：仅可调用插件 API（`setup`、`activate`、`deactivate`、`hooks`、`providers`）。
 
 上述七条同时构成 `DISCLAIMER.md` 中"明确不具备的能力"的依据。任一条被违反，免责边界即不成立，相关 Pull Request 不予合并。

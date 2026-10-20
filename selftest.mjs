@@ -14,7 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   diffSnapshots, buildMessage, totalChanges, mergeDiff, missingPrefixes,
-  sanitizeNotice, internals
+  sanitizeNotice, diffLines, summarizeFile, buildDetailText, internals
 } from './index.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -184,6 +184,101 @@ console.log('[7] scan scope and ignore rules');
   internals.saveState(before);
   const restored = internals.loadState();
   ok('state restored', totalChanges(restored.pending) === totalChanges(before.pending), `${totalChanges(restored.pending)} vs ${totalChanges(before.pending)}`);
+}
+
+console.log('[8] content detail');
+{
+  const d1 = diffLines('a\nb\nc', 'a\nb2\nc');
+  ok('line diff counts replacement', d1.added === 1 && d1.removed === 1, JSON.stringify(d1));
+  ok('line diff samples the new line', d1.samples[0] === 'b2', JSON.stringify(d1.samples));
+
+  const d2 = diffLines('a\nb\nc', 'a\nb\nc\nd');
+  ok('line diff counts pure insertion', d2.added === 1 && d2.removed === 0, JSON.stringify(d2));
+
+  const d3 = diffLines('a\nb\nc', 'a\nc');
+  ok('line diff counts pure deletion', d3.added === 0 && d3.removed === 1, JSON.stringify(d3));
+
+  const d4 = diffLines(null, 'x\ny');
+  ok('null old text treated as empty', d4.added === 2 && d4.removed === 0, JSON.stringify(d4));
+
+  const s1 = summarizeFile('skills/demo/skill.json', null,
+    JSON.stringify({ name: '演示', description: '一个示例技能', version: '1.0.0' }),
+    'added', { bytes: 100, binary: false, big: false, ext: 'json' });
+  ok('manifest summary carries name', s1.includes('演示'), s1);
+  ok('manifest summary carries description', s1.includes('示例技能'), s1);
+
+  const s1b = summarizeFile('skills/demo/skill.json', null,
+    JSON.stringify({ name: '演示', description: '一个示例技能', version: '1.0.0', tools: [{ name: '读网页' }, { name: '搜B站' }] }),
+    'added', { bytes: 100, binary: false, big: false, ext: 'json' });
+  ok('manifest summary lists tools (result)', s1b.includes('2 个能力') && s1b.includes('读网页'), s1b);
+
+  const s2 = summarizeFile('plugins/x/logo.png', null, null, 'added',
+    { bytes: 2048, binary: true, big: false, ext: 'png' });
+  ok('binary summary reports size only', s2.includes('二进制') && s2.includes('2.0 KB'), s2);
+
+  const s3 = summarizeFile('src/llm.js', 'const a = 1;\nfoo();', 'const a = 1;\nfoo(2);',
+    'changed', { bytes: 30, binary: false, big: false, ext: 'js' });
+  ok('text change summary has line stat', s3.includes('+1 -1'), s3);
+  ok('text change summary has sample', s3.includes('foo(2)'), s3);
+
+  const s4 = summarizeFile('src/llm.js', null,
+    '// 大模型调用封装：转发到宿主模型接口\n// wraps model calls\nfunction call() {}',
+    'added', { bytes: 60, binary: false, big: false, ext: 'js' });
+  ok('text summary carries header comment as effect', s4.includes('作用：') && s4.includes('大模型调用封装'), s4);
+
+  const s5 = summarizeFile('skills/x/index.js', null,
+    '// 作用说明\n// purpose\ncode();', 'added', { bytes: 40, binary: false, big: false, ext: 'js' });
+  ok('added text summary omits samples (no dup with header)', !s5.includes('如：'), s5);
+
+  const dt = buildDetailText(
+    { added: ['skills/demo/skill.json'], changed: ['src/llm.js'], removed: [] },
+    { 'skills/demo/skill.json': s1, 'src/llm.js': s3 }, {}
+  );
+  ok('detail grouped into sections', dt.includes('【新增】') && dt.includes('【修改】'), dt);
+  ok('detail references file and summary', dt.includes('skills/demo/skill.json') && dt.includes('演示'), dt);
+
+  const dtOff = buildDetailText({ added: ['x'], changed: [], removed: [] }, {}, { detailEnabled: false });
+  ok('detail disabled returns empty', dtOff === '', dtOff);
+}
+
+console.log('[9] content snapshot round-trip');
+{
+  const rel = 'skills/selftest-probe/sample.js';
+  internals.writeSnapshot(rel, 'line1\nline2');
+  const got = internals.readSnapshot(rel);
+  ok('snapshot round-trips', got === 'line1\nline2', String(got));
+  ok('snapshot file exists under contents dir',
+    fs.existsSync(path.join(internals.CONTENTS_DIR(), encodeURIComponent(rel))));
+  try { fs.unlinkSync(path.join(internals.CONTENTS_DIR(), encodeURIComponent(rel))); } catch { /* 忽略 / ignore */ }
+
+  if (IN_HOST) {
+    const rc = internals.readCurrent('config.json');
+    ok('readCurrent reads a real text file', rc.meta && !rc.meta.binary && typeof rc.text === 'string');
+  }
+}
+
+console.log('[10] intent extraction (effect / result)');
+{
+  const hc1 = internals.headComment('// 大模型调用封装\n// wraps model calls\nimport x from "x";');
+  ok('line comment header captured', hc1.includes('大模型调用封装'), hc1);
+
+  const hc2 = internals.headComment('#!/usr/bin/env node\n/**\n * 抽帧工具\n * frames\n */\nfunction go(){}');
+  ok('shebang stripped, block comment captured', hc2.includes('抽帧工具') && !hc2.includes('usr/bin'), hc2);
+
+  const hc3 = internals.headComment('import x from "x";\nfoo();');
+  ok('no header yields empty', hc3 === '', hc3);
+
+  const hc4 = internals.headComment('// ' + '很长的版权声明'.repeat(60) + '\ncode();');
+  ok('header capped to 160 chars', hc4.length <= 161, `len=${hc4.length}`);
+
+  const jm = internals.jsonMeta(JSON.stringify({ name: 'x', tools: [{ name: 'a' }, { id: 'b', name: '' }, { name: 'c' }] }));
+  ok('jsonMeta extracts tool names', jm.tools.length === 3 && jm.tools[0] === 'a' && jm.tools[1] === 'b', JSON.stringify(jm.tools));
+
+  const jmEmpty = internals.jsonMeta(JSON.stringify({ name: 'y' }));
+  ok('jsonMeta tools default empty', Array.isArray(jmEmpty.tools) && jmEmpty.tools.length === 0, JSON.stringify(jmEmpty.tools));
+
+  const jmBad = internals.jsonMeta('{not json');
+  ok('jsonMeta rejects bad json', jmBad === null);
 }
 
 console.log(`\n===== passed ${pass}, failed ${fail} =====`);
